@@ -22,6 +22,7 @@
 
 
 #include <uwsgi.h>
+#include <state_file.c>
 
 struct uwsgi_server uwsgi;
 pid_t masterpid;
@@ -1080,7 +1081,7 @@ void grace_them_all(int signum) {
 		}
 		return;
 	}
-	
+
 
 	uwsgi.status.gracefully_reloading = 1;
 
@@ -1521,9 +1522,9 @@ void uwsgi_backtrace(int depth) {
 
 	struct uwsgi_string_list *usl = uwsgi.alarm_segfault;
 	while(usl) {
-		uwsgi_alarm_trigger(usl->value, ub->buf, ub->pos);	
+		uwsgi_alarm_trigger(usl->value, ub->buf, ub->pos);
 		usl = usl->next;
-	}	
+	}
 
 	uwsgi_buffer_destroy(ub);
 #endif
@@ -3242,17 +3243,23 @@ void uwsgi_init_all_apps() {
 		}
 	}
 
+	FILE *state_file = create_state_file("/tmp/uwsgi_state");
+	write_uwsgi_state(state_file, 1);
+
 	usl = uwsgi.exec_post_app;
         while (usl) {
                 uwsgi_log("running \"%s\" (post app)...\n", usl->value);
                 int ret = uwsgi_run_command_and_wait(NULL, usl->value);
                 if (ret != 0) {
                         uwsgi_log("command \"%s\" exited with non-zero code: %d\n", usl->value, ret);
+			close_state_file(state_file);
                         exit(1);
                 }
                 usl = usl->next;
         }
 
+	write_uwsgi_state(state_file, 2);
+	close_state_file(state_file);
 
 }
 
@@ -3436,7 +3443,7 @@ void uwsgi_opt_set_str(char *opt, char *value, void *key) {
 	char **ptr = (char **) key;
 	if (!value) {
 		*ptr = "";
-		return;	
+		return;
 	}
 	*ptr = (char *) value;
 }
@@ -3494,7 +3501,7 @@ void uwsgi_opt_add_addr_list(char *opt, char *value, void *list) {
 #else
 	void *ip = uwsgi_malloc(4);
 #endif
-	
+
 	if (inet_pton(af, value, ip) <= 0) {
 		uwsgi_log("%s: invalid address\n", opt);
 		uwsgi_error("uwsgi_opt_add_addr_list()");
@@ -4165,7 +4172,7 @@ void uwsgi_print_sym(char *opt, char *symbol, void *foobar) {
 		uwsgi_log("%s", *sym);
 		exit(0);
 	}
-	
+
 	char *symbol_start = uwsgi_concat2(symbol, "_start");
 	char *symbol_end = uwsgi_concat2(symbol, "_end");
 

@@ -48,12 +48,6 @@ struct uwsgi_option uwsgi_rack_options[] = {
         {"rbshell", optional_argument, 0, "run  a ruby/irb shell", uwsgi_opt_rbshell, NULL, 0},
         {"rbshell-oneshot", no_argument, 0, "set ruby/irb shell (one shot)", uwsgi_opt_rbshell, NULL, 0},
 
-#ifdef RUBY19
-        {"rb-threads", required_argument, 0, "set the number of ruby threads to run", uwsgi_opt_set_int, &ur.rb_threads, 0},
-        {"rbthreads", required_argument, 0, "set the number of ruby threads to run", uwsgi_opt_set_int, &ur.rb_threads, 0},
-        {"ruby-threads", required_argument, 0, "set the number of ruby threads to run", uwsgi_opt_set_int, &ur.rb_threads, 0},
-#endif
-
         {0, 0, 0, 0, 0, 0 ,0},
 
 };
@@ -141,13 +135,13 @@ static struct uwsgi_buffer *uwsgi_ruby_backtrace(struct wsgi_request *wsgi_req) 
 		// ok let's start the C dance to parse the backtrace
 		char *colon = strchr(bt, ':');
 		if (!colon) continue;
-		filename = uwsgi_concat2n(bt, colon-bt, "", 0);
+		filename = uwsgi_concat2n(bt, (int) (colon-bt), "", 0);
 		uint16_t filename_len = colon-bt;
 		colon++; if (*colon == 0) goto error;
 		char *lineno_ptr = colon;
 		colon = strchr(lineno_ptr, ':');
 		if (!colon) goto error;
-		int64_t lineno = uwsgi_str_num(lineno_ptr, colon-lineno_ptr);
+		int64_t lineno = uwsgi_str_num(lineno_ptr, (int) (colon-lineno_ptr));
 		colon++; if (*colon == 0) goto error;
 		colon = strchr(lineno_ptr, '`');
 		if (!colon) goto error;
@@ -155,7 +149,7 @@ static struct uwsgi_buffer *uwsgi_ruby_backtrace(struct wsgi_request *wsgi_req) 
 		char *function_ptr = colon;
 		char *function_end = strchr(function_ptr, '\'');
 		if (!function_end) goto error;
-		function = uwsgi_concat2n(function_ptr, function_end-function_ptr, "", 0);
+		function = uwsgi_concat2n(function_ptr, (int) (function_end-function_ptr), "", 0);
 		uint16_t function_len = function_end-function_ptr;
 
 		if (uwsgi_buffer_u16le(ub, filename_len)) goto error;
@@ -312,7 +306,7 @@ VALUE init_rack_app(VALUE);
 
 VALUE rack_call_rpc_handler(VALUE args) {
         VALUE rpc_args = rb_ary_entry(args, 1);
-        return rb_funcall2(rb_ary_entry(args, 0), rb_intern("call"), RARRAY_LEN(rpc_args), RARRAY_PTR(rpc_args));
+        return rb_funcall2(rb_ary_entry(args, 0), rb_intern("call"), (int) RARRAY_LEN(rpc_args), RARRAY_PTR(rpc_args));
 }
 
 
@@ -462,9 +456,9 @@ static void rack_hack_dollar_zero(VALUE name, ID id) {
 int uwsgi_rack_init(){
 
 #ifdef RUBY19
-	int argc = 2;
-	char *sargv[] = { (char *) "uwsgi", (char *) "-e0" };
-	char **argv = sargv;
+        int argc = 2;
+        char *sargv[] = { uwsgi.binary_path, (char *) "-e0" };
+        char **argv = sargv;
 #endif
 
 	if (ur.gemset) {
@@ -473,13 +467,20 @@ int uwsgi_rack_init(){
 
 #ifdef RUBY19
 	ruby_sysinit(&argc, &argv);
-	RUBY_INIT_STACK
+        RUBY_INIT_STACK
+#ifdef RUBY_EXEC_PREFIX
+	if (!strcmp(RUBY_EXEC_PREFIX, "")) {
+		uwsgi_log("*** detected a ruby vm built with --enable-load-relative ***\n");
+		uwsgi_log("*** if you get errors about rubygems.rb, force the RUBY_EXEC_PREFIX with --chdir ***\n");
+	}
+#endif
 	ruby_init();
-	ruby_process_options(argc, argv);
+	ruby_options(argc, argv);
 #else
 	ruby_init();
 	ruby_init_loadpath();
 #endif
+
 	ruby_show_version();
 
 	ruby_script("uwsgi");
@@ -492,7 +493,6 @@ int uwsgi_rack_init(){
 	ur.rpc_protector = rb_ary_new();
 	rb_gc_register_address(&ur.signals_protector);
 	rb_gc_register_address(&ur.rpc_protector);
-
 
 	uwsgi_rack_init_api();	
 
@@ -860,6 +860,10 @@ int uwsgi_rack_request(struct wsgi_request *wsgi_req) {
 	rb_hash_aset(env, rb_str_new2("rack.input"), rb_funcall(ur.rb_uwsgi_io_class, rb_intern("new"), 1, dws_wr ));
 
 	rb_hash_aset(env, rb_str_new2("rack.errors"), rb_funcall( rb_const_get(rb_cObject, rb_intern("IO")), rb_intern("new"), 2, INT2NUM(2), rb_str_new("w",1) ));
+
+	rb_hash_aset(env, rb_str_new2("uwsgi.core"), INT2NUM(wsgi_req->async_id));
+	rb_hash_aset(env, rb_str_new2("uwsgi.version"), rb_str_new2(UWSGI_VERSION));
+	rb_hash_aset(env, rb_str_new2("uwsgi.node"), rb_str_new2(uwsgi.hostname));
 
 	// remove HTTP_CONTENT_LENGTH and HTTP_CONTENT_TYPE
 	rb_hash_delete(env, rb_str_new2("HTTP_CONTENT_LENGTH"));
@@ -1240,11 +1244,22 @@ void uwsgi_ruby_init_thread(int core_id) {
 }
 
 void uwsgi_rack_postinit_apps(void) {
-
-	if (ur.rb_threads > 1) {
-	}
 }
 
+/*
+	If the ruby VM has rb_reserved_fd_p, we avoid closign the filedescriptor needed by
+	modern ruby (the Matz ones) releases.
+*/
+static void uwsgi_ruby_cleanup() {
+	int (*uptr_rb_reserved_fd_p)(int) = dlsym(RTLD_DEFAULT, "rb_reserved_fd_p");
+	if (!uptr_rb_reserved_fd_p) return;
+	int i;
+	for (i = 3; i < (int) uwsgi.max_fd; i++) {
+		if (uptr_rb_reserved_fd_p(i)) {
+			uwsgi_add_safe_fd(i);
+		}
+	}
+}
 
 struct uwsgi_plugin rack_plugin = {
 
@@ -1287,5 +1302,7 @@ struct uwsgi_plugin rack_plugin = {
 	.exception_repr = uwsgi_ruby_exception_repr,
 	.exception_log = uwsgi_ruby_exception_log,
 	.backtrace = uwsgi_ruby_backtrace,
+
+	.master_cleanup = uwsgi_ruby_cleanup,
 };
 

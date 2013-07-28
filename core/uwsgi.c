@@ -73,6 +73,8 @@ static struct uwsgi_option uwsgi_base_options[] = {
 	{"xml", required_argument, 'x', "load config from xml file", uwsgi_opt_load_xml, NULL, UWSGI_OPT_IMMEDIATE},
 #endif
 	{"config", required_argument, 0, "load configuration using the pluggable system", uwsgi_opt_load_config, NULL, UWSGI_OPT_IMMEDIATE},
+	{"fallback-config", required_argument, 0, "re-exec uwsgi with the specified config when exit code is 1", uwsgi_opt_set_str, &uwsgi.fallback_config, UWSGI_OPT_IMMEDIATE},
+	{"strict", no_argument, 0, "enable strict mode (placeholder cannot be used)", uwsgi_opt_true, &uwsgi.strict, UWSGI_OPT_IMMEDIATE},
 
 	{"skip-zero", no_argument, 0, "skip check of file descriptor 0", uwsgi_opt_true, &uwsgi.skip_zero, 0},
 	{"skip-atexit", no_argument, 0, "skip atexit hooks (ignored by the master)", uwsgi_opt_true, &uwsgi.skip_atexit, 0},
@@ -172,6 +174,7 @@ static struct uwsgi_option uwsgi_base_options[] = {
 	{"master", no_argument, 'M', "enable master process", uwsgi_opt_true, &uwsgi.master_process, 0},
 	{"honour-stdin", no_argument, 0, "do not remap stdin to /dev/null", uwsgi_opt_true, &uwsgi.honour_stdin, 0},
 	{"emperor", required_argument, 0, "run the Emperor", uwsgi_opt_add_string_list, &uwsgi.emperor, 0},
+	{"emperor-nofollow", no_argument, 0, "do not follow symlinks when checking for mtime", uwsgi_opt_true, &uwsgi.emperor_nofollow, 0},
 	{"emperor-procname", required_argument, 0, "set the Emperor process name", uwsgi_opt_set_str, &uwsgi.emperor_procname, 0},
 	{"emperor-freq", required_argument, 0, "set the Emperor scan frequency (default 3 seconds)", uwsgi_opt_set_int, &uwsgi.emperor_freq, 0},
 	{"emperor-required-heartbeat", required_argument, 0, "set the Emperor tolerance about heartbeats", uwsgi_opt_set_int, &uwsgi.emperor_heartbeat, 0},
@@ -204,6 +207,7 @@ static struct uwsgi_option uwsgi_base_options[] = {
 	{"worker-reload-mercy", required_argument, 0, "set the maximum time (in seconds) a worker can take to reload/shutdown (default is 60)", uwsgi_opt_set_int, &uwsgi.worker_reload_mercy, 0},
 	{"exit-on-reload", no_argument, 0, "force exit even if a reload is requested", uwsgi_opt_true, &uwsgi.exit_on_reload, 0},
 	{"die-on-term", no_argument, 0, "exit instead of brutal reload on SIGTERM", uwsgi_opt_true, &uwsgi.die_on_term, 0},
+	{"force-gateway", no_argument, 0, "force teh spawn of the first registered gateway without a master", uwsgi_opt_true, &uwsgi.force_gateway, 0},
 	{"help", no_argument, 'h', "show this help", uwsgi_help, NULL, UWSGI_OPT_IMMEDIATE},
 	{"usage", no_argument, 'h', "show this help", uwsgi_help, NULL, UWSGI_OPT_IMMEDIATE},
 
@@ -222,8 +226,8 @@ static struct uwsgi_option uwsgi_base_options[] = {
 	{"ftok", required_argument, 0, "set the ipcsem key via ftok() for avoiding duplicates", uwsgi_opt_set_str, &uwsgi.ftok, 0},
 	{"sharedarea", required_argument, 'A', "create a raw shared memory area of specified pages", uwsgi_opt_set_int, &uwsgi.sharedareasize, 0},
 
-	{"safe-fd", no_argument, 0, "do not close the specified file descriptor", uwsgi_opt_safe_fd, NULL, 0},
-	{"fd-safe", no_argument, 0, "do not close the specified file descriptor", uwsgi_opt_safe_fd, NULL, 0},
+	{"safe-fd", required_argument, 0, "do not close the specified file descriptor", uwsgi_opt_safe_fd, NULL, 0},
+	{"fd-safe", required_argument, 0, "do not close the specified file descriptor", uwsgi_opt_safe_fd, NULL, 0},
 
 	{"cache", required_argument, 0, "create a shared cache containing given elements", uwsgi_opt_set_64bit, &uwsgi.cache_max_items, 0},
 	{"cache-blocksize", required_argument, 0, "set cache blocksize", uwsgi_opt_set_64bit, &uwsgi.cache_blocksize, 0},
@@ -237,6 +241,7 @@ static struct uwsgi_option uwsgi_base_options[] = {
 	{"cache-sync", required_argument, 0, "copy the whole content of another uWSGI cache server on server startup", uwsgi_opt_set_str, &uwsgi.cache_sync, 0},
 	{"cache-use-last-modified", no_argument, 0, "update last_modified_at timestamp on every cache item modification (default is disabled)", uwsgi_opt_true, &uwsgi.cache_use_last_modified, 0},
 
+	{"add-cache-item", required_argument, 0, "add an item in the cache", uwsgi_opt_add_string_list, &uwsgi.add_cache_item, 0},
 	{"load-file-in-cache", required_argument, 0, "load a static file in the cache", uwsgi_opt_add_string_list, &uwsgi.load_file_in_cache, 0},
 #ifdef UWSGI_ZLIB
 	{"load-file-in-cache-gzip", required_argument, 0, "load a static file in the cache with gzip compression", uwsgi_opt_add_string_list, &uwsgi.load_file_in_cache_gzip, 0},
@@ -335,6 +340,9 @@ static struct uwsgi_option uwsgi_base_options[] = {
 	{"evil-reload-on-as", required_argument, 0, "force the master to reload a worker if its address space is higher than specified megabytes", uwsgi_opt_set_megabytes, &uwsgi.evil_reload_on_as, UWSGI_OPT_MASTER | UWSGI_OPT_MEMORY},
 	{"evil-reload-on-rss", required_argument, 0, "force the master to reload a worker if its rss memory is higher than specified megabytes", uwsgi_opt_set_megabytes, &uwsgi.evil_reload_on_rss, UWSGI_OPT_MASTER | UWSGI_OPT_MEMORY},
 
+	{"reload-on-fd", required_argument, 0, "reload if the specified file descriptor is ready", uwsgi_opt_add_string_list, &uwsgi.reload_on_fd, UWSGI_OPT_MASTER},
+	{"brutal-reload-on-fd", required_argument, 0, "brutal reload if the specified file descriptor is ready", uwsgi_opt_add_string_list, &uwsgi.brutal_reload_on_fd, UWSGI_OPT_MASTER},
+
 #ifdef __linux__
 #ifdef MADV_MERGEABLE
 	{"ksm", optional_argument, 0, "enable Linux KSM", uwsgi_opt_set_int, &uwsgi.linux_ksm, 0},
@@ -351,6 +359,11 @@ static struct uwsgi_option uwsgi_base_options[] = {
 	{"touch-logreopen", required_argument, 0, "trigger log reopen if the specified file is modified/touched", uwsgi_opt_add_string_list, &uwsgi.touch_logreopen, UWSGI_OPT_MASTER | UWSGI_OPT_LOG_MASTER},
 	{"touch-exec", required_argument, 0, "run command when the specified file is modified/touched (syntax: file command)", uwsgi_opt_add_string_list, &uwsgi.touch_exec, UWSGI_OPT_MASTER},
 	{"touch-signal", required_argument, 0, "signal when the specified file is modified/touched (syntax: file signal)", uwsgi_opt_add_string_list, &uwsgi.touch_signal, UWSGI_OPT_MASTER},
+
+	{"fs-reload", required_argument, 0, "graceful reload when the specified filesystem object is modified", uwsgi_opt_add_string_list, &uwsgi.fs_reload, UWSGI_OPT_MASTER},
+	{"fs-brutal-reload", required_argument, 0, "brutal reload when the specified filesystem object is modified", uwsgi_opt_add_string_list, &uwsgi.fs_brutal_reload, UWSGI_OPT_MASTER},
+	{"fs-signal", required_argument, 0, "raise a uwsgi signal when the specified filesystem object is modified (syntax: file signal)", uwsgi_opt_add_string_list, &uwsgi.fs_signal, UWSGI_OPT_MASTER},
+
 	{"propagate-touch", no_argument, 0, "over-engineering option for system with flaky signal mamagement", uwsgi_opt_true, &uwsgi.propagate_touch, 0},
 	{"limit-post", required_argument, 0, "limit request body", uwsgi_opt_set_64bit, &uwsgi.limit_post, 0},
 	{"no-orphans", no_argument, 0, "automatically kill workers if master dies (can be dangerous for availability)", uwsgi_opt_true, &uwsgi.no_orphans, 0},
@@ -641,6 +654,8 @@ static struct uwsgi_option uwsgi_base_options[] = {
 	{"close-on-exec", no_argument, 0, "set close-on-exec on sockets (could be required for spawning processes in requests)", uwsgi_opt_true, &uwsgi.close_on_exec, 0},
 	{"mode", required_argument, 0, "set uWSGI custom mode", uwsgi_opt_set_str, &uwsgi.mode, 0},
 	{"env", required_argument, 0, "set environment variable", uwsgi_opt_set_env, NULL, 0},
+	{"envdir", required_argument, 0, "load a daemontools compatible envdir", uwsgi_opt_add_string_list, &uwsgi.envdirs, 0},
+	{"early-envdir", required_argument, 0, "load a daemontools compatible envdir ASAP", uwsgi_opt_envdir, NULL, UWSGI_OPT_IMMEDIATE},
 	{"unenv", required_argument, 0, "unset environment variable", uwsgi_opt_unset_env, NULL, 0},
 	{"vacuum", no_argument, 0, "try to remove all of the generated file/sockets", uwsgi_opt_true, &uwsgi.vacuum, 0},
 	{"file-write", required_argument, 0, "write the specified content to the specified file (syntax: file=value) before privileges drop", uwsgi_opt_add_string_list, &uwsgi.file_write_list, 0},
@@ -1493,7 +1508,7 @@ void uwsgi_plugins_atexit(void) {
 
 void uwsgi_backtrace(int depth) {
 
-#if defined(__linux__) || defined(__APPLE__) || defined(UWSGI_HAS_EXECINFO)
+#if defined(__linux__) || (defined(__APPLE__) && !defined(NO_EXECINFO)) || defined(UWSGI_HAS_EXECINFO)
 
 #include <execinfo.h>
 
@@ -1750,6 +1765,8 @@ int main(int argc, char *argv[], char *envp[]) {
 	uwsgi_register_clock(&uwsgi_unix_clock);
 	uwsgi_set_clock("unix");
 
+	// fallback config
+	atexit(uwsgi_fallback_config);
 	// manage/flush logs
 	atexit(uwsgi_flush_logs);
 	// clear sockets, pidfiles...
@@ -1893,6 +1910,9 @@ int main(int argc, char *argv[], char *envp[]) {
 
 	// ok, the options dictionary is available, lets manage it
 	uwsgi_configure();
+
+	// manage envdirs ASAP
+	uwsgi_envdirs(uwsgi.envdirs);
 
 	// --get management
 	struct uwsgi_string_list *get_list = uwsgi.get_list;
@@ -2451,6 +2471,11 @@ int uwsgi_start(void *v_argv) {
 	else if (!uwsgi.sockets && ushared->gateways_cnt && !uwsgi.no_server && !uwsgi.master_process) {
 		// here we will have a zombie... sorry
 		uwsgi_log("...you should enable the master process... really...\n");
+		if (uwsgi.force_gateway) {
+			struct uwsgi_gateway *ug = &ushared->gateways[0];
+			ug->loop(0, ug->data);
+			// when we are here the gateway is dead :(
+		}
 		exit(0);
 	}
 
@@ -3405,7 +3430,9 @@ void uwsgi_opt_set_16bit(char *opt, char *value, void *key) {
         uint16_t *ptr = (uint16_t *) key;
 
         if (value) {
-                *ptr = (strtoul(value, NULL, 10));
+		unsigned long n = strtoul(value, NULL, 10);
+		if (n > 65535) n = 65535;
+                *ptr = n;
         }
         else {
                 *ptr = 1;
@@ -3666,9 +3693,13 @@ void uwsgi_opt_set_env(char *opt, char *value, void *none) {
 }
 
 void uwsgi_opt_unset_env(char *opt, char *value, void *none) {
+#ifdef UNSETENV_VOID
+	unsetenv(value);
+#else
 	if (unsetenv(value)) {
 		uwsgi_error("unsetenv()");
 	}
+#endif
 }
 
 void uwsgi_opt_pidfile_signal(char *opt, char *pidfile, void *sig) {

@@ -3544,8 +3544,6 @@ void uwsgi_init_all_apps() {
 	}
 
 
-	FILE *state_file = create_state_file("/tmp/uwsgi_state");
-
 	// no app initialized and virtualhosting enabled
 	if (uwsgi_apps_cnt == 0 && uwsgi.numproc > 0 && !uwsgi.command_mode) {
 		if (uwsgi.need_app) {

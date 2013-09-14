@@ -3,6 +3,9 @@
 extern struct uwsgi_server uwsgi;
 
 struct uwsgi_buffer *uwsgi_buffer_new(size_t len) {
+#ifdef UWSGI_DEBUG_BUFFER
+	uwsgi_log("[uwsgi-buffer] allocating a new buffer of %llu\n", (unsigned long long) len);
+#endif
 	struct uwsgi_buffer *ub = uwsgi_calloc(sizeof(struct uwsgi_buffer));
 
 	if (len) {
@@ -169,6 +172,16 @@ int uwsgi_buffer_u32be(struct uwsgi_buffer *ub, uint32_t num) {
         return uwsgi_buffer_append(ub, (char *) buf, 4);
 }
 
+int uwsgi_buffer_f32be(struct uwsgi_buffer *ub, float num) {
+        uint8_t buf[4];
+	uint32_t *pnum = (uint32_t *) &num;
+        buf[3] = (uint8_t) (*pnum & 0xff);
+        buf[2] = (uint8_t) ((*pnum >> 8) & 0xff);
+        buf[1] = (uint8_t) ((*pnum >> 16) & 0xff);
+        buf[0] = (uint8_t) ((*pnum >> 24) & 0xff);
+        return uwsgi_buffer_append(ub, (char *) buf, 4);
+}
+
 int uwsgi_buffer_u32le(struct uwsgi_buffer *ub, uint32_t num) {
         uint8_t buf[4];
         buf[0] = (uint8_t) (num & 0xff);
@@ -191,6 +204,20 @@ int uwsgi_buffer_u64be(struct uwsgi_buffer *ub, uint64_t num) {
         return uwsgi_buffer_append(ub, (char *) buf, 8);
 }
 
+
+int uwsgi_buffer_f64be(struct uwsgi_buffer *ub, double num) {
+        uint8_t buf[8];
+	uint64_t *pnum = (uint64_t *) &num;
+        buf[7] = (uint8_t) (*pnum & 0xff);
+        buf[6] = (uint8_t) ((*pnum >> 8) & 0xff);
+        buf[5] = (uint8_t) ((*pnum >> 16) & 0xff);
+        buf[4] = (uint8_t) ((*pnum >> 24) & 0xff);
+        buf[3] = (uint8_t) ((*pnum >> 32) & 0xff);
+        buf[2] = (uint8_t) ((*pnum >> 40) & 0xff);
+        buf[1] = (uint8_t) ((*pnum >> 48) & 0xff);
+        buf[0] = (uint8_t) ((*pnum >> 56) & 0xff);
+        return uwsgi_buffer_append(ub, (char *) buf, 8);
+}
 
 int uwsgi_buffer_append_ipv4(struct uwsgi_buffer *ub, void *addr) {
 	char ip[INET_ADDRSTRLEN];
@@ -271,8 +298,9 @@ int uwsgi_buffer_append_base64(struct uwsgi_buffer *ub, char *s, size_t len) {
 
 void uwsgi_buffer_destroy(struct uwsgi_buffer *ub) {
 #ifdef UWSGI_DEBUG_BUFFER
+	uwsgi_log("[uwsgi-buffer] destroying buffer of %llu bytes\n", (unsigned long long) ub->len);
 	if (ub->freed) {
-		uwsgi_log("[BUG] buffer at %p already destroyed !!!\n", ub);
+		uwsgi_log("[uwsgi-buffer][BUG] buffer at %p already destroyed !!!\n", ub);
 	}
 	ub->freed = 1;
 #endif

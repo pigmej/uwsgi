@@ -66,11 +66,17 @@ void linux_namespace_start(void *argv) {
 			uwsgi_error("clone()");
 			exit(1);
 		}
-
+#if defined(MS_REC) && defined(MS_PRIVATE)
+		if (mount(NULL, "/", NULL, MS_REC|MS_PRIVATE, NULL)) {
+			uwsgi_error("mount()");
+			exit(1);
+		}
+#endif
 		// run the post-jail scripts
 		if (setenv("UWSGI_JAIL_PID", uwsgi_num2str((int) pid), 1)) {
 			uwsgi_error("setenv()");
 		}
+		uwsgi_hooks_run(uwsgi.hook_post_jail, "post-jail", 1);
         	struct uwsgi_string_list *usl = uwsgi.exec_post_jail;
         	while(usl) {
                 	uwsgi_log("running \"%s\" (post-jail)...\n", usl->value);
@@ -81,6 +87,13 @@ void linux_namespace_start(void *argv) {
                 	}
                 	usl = usl->next;
         	}
+
+		uwsgi_foreach(usl, uwsgi.call_post_jail) {
+                        if (uwsgi_call_symbol(usl->value)) {
+                                uwsgi_log("unable to call function \"%s\"\n", usl->value);
+				exit(1);
+                        }
+                }
 
 		uwsgi_log("waiting for jailed master (pid: %d) death...\n", (int) pid);
 		pid = waitpid(pid, &waitpid_status, 0);
@@ -167,6 +180,7 @@ void linux_namespace_jail() {
 	uwsgi_log("remounting /proc\n");
 	if (mount("proc", "/proc", "proc", 0, NULL)) {
 		uwsgi_error("mount()");
+		exit(1);
 	}
 
 	struct uwsgi_string_list *usl = uwsgi.ns_keep_mount;

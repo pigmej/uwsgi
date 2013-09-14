@@ -49,7 +49,19 @@ uwsgi.post_fork_hook = postfork_chain_hook
 
 class postfork(object):
     def __init__(self, f):
-        postfork_chain.append(f)
+        if callable(f):
+            self.wid = 0
+            self.f = f
+        else:
+            self.f = None
+            self.wid = f
+        postfork_chain.append(self)
+    def __call__(self, *args, **kwargs):
+        if self.f:
+            if self.wid > 0 and self.wid != uwsgi.worker_id():
+                return
+            return self.f()
+        self.f = args[0]
 
 
 class _spoolraw(object):
@@ -366,9 +378,9 @@ class harakiri(object):
     def __init__(self, seconds):
         self.s = seconds
 
-    def real_call(self, *args):
+    def real_call(self, *args, **kwargs):
         uwsgi.set_user_harakiri(self.s)
-        r = self.f(*args)
+        r = self.f(*args, **kwargs)
         uwsgi.set_user_harakiri(0)
         return r
 

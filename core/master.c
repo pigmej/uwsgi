@@ -393,7 +393,7 @@ int master_loop(char **argv, char **environ) {
 	}
 
 	if (uwsgi.stats) {
-		char *tcp_port = strchr(uwsgi.stats, ':');
+		char *tcp_port = strrchr(uwsgi.stats, ':');
 		if (tcp_port) {
 			// disable deferred accept for this socket
 			int current_defer_accept = uwsgi.no_defer_accept;
@@ -904,6 +904,11 @@ next:
 		}
 		else if (WIFEXITED(waitpid_status) && WEXITSTATUS(waitpid_status) == UWSGI_QUIET_CODE) {
 			// noop
+		}
+		else if (WIFEXITED(waitpid_status) && WEXITSTATUS(waitpid_status) == UWSGI_BRUTAL_RELOAD_CODE) {
+			uwsgi_log("!!! inconsistent state reported by worker %d (pid: %d) !!!\n", thewid, (int) diedpid);
+			reap_them_all(0);
+			continue;
 		}
 		else if (uwsgi.workers[thewid].manage_next_request) {
 			if (WIFSIGNALED(waitpid_status)) {

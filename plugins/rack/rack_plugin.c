@@ -28,6 +28,11 @@ struct uwsgi_option uwsgi_rack_options[] = {
         {"ruby-gc-freq", required_argument, 0, "set ruby GC frequency", uwsgi_opt_set_int, &ur.gc_freq, 0},
         {"rb-gc-freq", required_argument, 0, "set ruby GC frequency", uwsgi_opt_set_int, &ur.gc_freq, 0},
 
+#ifdef RUBY19
+	{"rb-lib", required_argument, 0, "add a directory to the ruby libdir search path", uwsgi_opt_add_string_list, &ur.libdir, 0},
+	{"ruby-lib", required_argument, 0, "add a directory to the ruby libdir search path", uwsgi_opt_add_string_list, &ur.libdir, 0},
+#endif
+
         {"rb-require", required_argument, 0, "import/require a ruby module/script", uwsgi_opt_add_string_list, &ur.rbrequire, 0},
         {"ruby-require", required_argument, 0, "import/require a ruby module/script", uwsgi_opt_add_string_list, &ur.rbrequire, 0},
         {"rbrequire", required_argument, 0, "import/require a ruby module/script", uwsgi_opt_add_string_list, &ur.rbrequire, 0},
@@ -457,7 +462,7 @@ int uwsgi_rack_init(){
 
 #ifdef RUBY19
         int argc = 2;
-        char *sargv[] = { uwsgi.binary_path, (char *) "-e0" };
+        char *sargv[] = { (char *) "uwsgi", (char *) "-e0" };
         char **argv = sargv;
 #endif
 
@@ -468,13 +473,30 @@ int uwsgi_rack_init(){
 #ifdef RUBY19
 	ruby_sysinit(&argc, &argv);
         RUBY_INIT_STACK
+#ifdef UWSGI_RUBY_HEROKU
+	uwsgi_log("*** Heroku system detected ***\n");
+#endif
 #ifdef RUBY_EXEC_PREFIX
 	if (!strcmp(RUBY_EXEC_PREFIX, "")) {
 		uwsgi_log("*** detected a ruby vm built with --enable-load-relative ***\n");
-		uwsgi_log("*** if you get errors about rubygems.rb, force the RUBY_EXEC_PREFIX with --chdir ***\n");
+		uwsgi_log("*** if you get errors about rubygems.rb, you can:\n");
+		uwsgi_log("*** 1) add a directory to the libdir search path using --ruby-libdir ***\n");
+		uwsgi_log("*** 2) force the RUBY_EXEC_PREFIX with --chdir ***\n");
+#ifdef UWSGI_RUBY_LIBDIR
+		uwsgi_string_new_list(&ur.libdir, UWSGI_RUBY_LIBDIR);
+#endif
+#ifdef UWSGI_RUBY_ARCHDIR
+		uwsgi_string_new_list(&ur.libdir, UWSGI_RUBY_ARCHDIR);
+#endif
 	}
 #endif
 	ruby_init();
+	struct uwsgi_string_list *usl = ur.libdir;
+	while(usl) {
+		ruby_incpush(usl->value);
+		uwsgi_log("[ruby-libdir] pushed %s\n", usl->value);
+		usl = usl->next;
+	}
 	ruby_options(argc, argv);
 #else
 	ruby_init();
@@ -796,6 +818,18 @@ int uwsgi_rack_request(struct wsgi_request *wsgi_req) {
 	uwsgi_apps[wsgi_req->app_id].requests++;
 
         env = rb_hash_new();
+	// the following vars have to always been defined (we skip REQUEST_METHOD and PATH_INFO as they should always be available)
+	rb_hash_aset(env, rb_str_new2("SCRIPT_NAME"), rb_str_new2(""));
+	rb_hash_aset(env, rb_str_new2("QUERY_STRING"), rb_str_new2(""));
+	rb_hash_aset(env, rb_str_new2("SERVER_NAME"), rb_str_new2(uwsgi.hostname));
+	// SERVER_PORT
+        char *server_port = strchr(wsgi_req->socket->name, ':');
+        if (server_port) {
+		rb_hash_aset(env, rb_str_new2("SERVER_PORT"), rb_str_new(server_port+1, strlen(server_port+1)));
+        }
+        else {
+		rb_hash_aset(env, rb_str_new2("SERVER_PORT"), rb_str_new2("80"));
+        }
 
         // fill ruby hash
         for(i=0;i<wsgi_req->var_cnt;i++) {

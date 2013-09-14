@@ -1,6 +1,6 @@
 # uWSGI build system
 
-uwsgi_version = '1.9.15-dev'
+uwsgi_version = '1.9.16-dev'
 
 import os
 import re
@@ -509,9 +509,9 @@ class uConf(object):
         self.gcc_list = ['core/utils', 'core/protocol', 'core/socket', 'core/logging', 'core/master', 'core/master_utils', 'core/emperor',
             'core/notify', 'core/mule', 'core/subscription', 'core/stats', 'core/sendfile', 'core/async', 'core/master_checks',
             'core/offload', 'core/io', 'core/static', 'core/websockets', 'core/spooler', 'core/snmp', 'core/exceptions', 'core/config',
-            'core/setup_utils', 'core/clock', 'core/init', 'core/buffer', 'core/reader', 'core/writer', 'core/alarm', 'core/cron',
+            'core/setup_utils', 'core/clock', 'core/init', 'core/buffer', 'core/reader', 'core/writer', 'core/alarm', 'core/cron', 'core/hooks',
             'core/plugins', 'core/lock', 'core/cache', 'core/daemons', 'core/errors', 'core/hash', 'core/master_events', 'core/chunked',
-            'core/queue', 'core/event', 'core/signal', 'core/strings', 'core/progress', 'core/timebomb', 'core/ini', 'core/fsmon',
+            'core/queue', 'core/event', 'core/signal', 'core/strings', 'core/progress', 'core/timebomb', 'core/ini', 'core/fsmon', 'core/mount',
             'core/rpc', 'core/gateway', 'core/loop', 'core/cookie', 'core/querystring', 'core/rb_timers', 'core/transformations', 'core/uwsgi']
         # add protocols
         self.gcc_list.append('proto/base')
@@ -570,6 +570,14 @@ class uConf(object):
         if additional_include_paths:
             for ipath in additional_include_paths.split():
                 self.include_path.append(ipath)
+
+        if 'UWSGI_REMOVE_INCLUDES' in os.environ:
+            for inc in os.environ['UWSGI_REMOVE_INCLUDES'].split(','):
+                try:
+                    self.include_path.remove(inc)
+                except:
+                    pass
+
             
         if not mute:
             print("detected include path: %s" % self.include_path)
@@ -649,6 +657,10 @@ class uConf(object):
 
         kvm_list = ['FreeBSD', 'OpenBSD', 'NetBSD', 'DragonFly']
 
+        if 'UWSGI_AS_LIB' in os.environ:
+            self.set('as_shared_library', 'true')
+            self.set('bin_name', os.environ['UWSGI_AS_LIB'])
+
         if self.has_include('ifaddrs.h'):
             self.cflags.append('-DUWSGI_HAS_IFADDRS')
             report['ifaddrs'] = True
@@ -680,6 +692,7 @@ class uConf(object):
 
         if uwsgi_os == 'SunOS':
             self.libs.append('-lsendfile')
+            self.libs.append('-lrt')
             self.gcc_list.append('lib/sun_fixes')
             self.ldflags.append('-L/lib')
             if not uwsgi_os_v.startswith('Nexenta'):
@@ -918,10 +931,11 @@ class uConf(object):
             self.libs.append('-lcap')
             report['capabilities'] = True
 
-        if self.has_include('matheval.h'):
-            self.cflags.append("-DUWSGI_MATHEVAL")
-            self.libs.append('-lmatheval')
-            report['matheval'] = True
+        if self.get('matheval'):
+            if (self.get('matheval') == 'auto' and self.has_include('matheval.h')) or self.get('matheval') == 'true':
+                self.cflags.append("-DUWSGI_MATHEVAL")
+                self.libs.append('-lmatheval')
+                report['matheval'] = True
 
         has_json = False
         has_uuid = False
@@ -938,6 +952,9 @@ class uConf(object):
             uwsgi_version += self.get('append_version')
 
 
+        if uwsgi_os == 'FreeBSD' and self.has_include('jail.h'):
+            self.cflags.append('-DUWSGI_HAS_FREEBSD_LIBJAIL')
+            self.libs.append('-ljail')
 
         if uwsgi_os == 'Linux':
             if self.get('embed_config'):
@@ -1113,7 +1130,7 @@ class uConf(object):
                 report['xml'] = 'expat'
 
         if self.get('plugin_dir'):
-            self.cflags.append('-DUWSGI_PLUGIN_DIR=\\"%s\\"' % self.get('plugin_dir'))
+            self.cflags.append('-DUWSGI_PLUGIN_DIR="\\"%s\\""' % self.get('plugin_dir'))
             report['plugin_dir'] = self.get('plugin_dir')
 
         if self.get('debug'):
@@ -1322,10 +1339,10 @@ if __name__ == "__main__":
         bconf = os.environ.get('UWSGI_PROFILE','default.ini')
         try:
             bconf = sys.argv[3]
-            if not bconf.endswith('.ini'):
-                bconf += '.ini'
         except:
             pass
+        if not bconf.endswith('.ini'):
+            bconf += '.ini'
         if not '/' in bconf:
             bconf = 'buildconf/%s' % bconf
         uc = uConf(bconf)
@@ -1350,6 +1367,7 @@ if __name__ == "__main__":
         os.system("rm -f lib/*.o")
         os.system("rm -f plugins/*/*.o")
         os.system("rm -f build/*.o")
+        os.system("rm -f core/dot_h.c")
     elif cmd == '--check':
         os.system("cppcheck --max-configs=1000 --enable=all -q core/ plugins/ proto/ lib/ apache2/")
 

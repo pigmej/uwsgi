@@ -394,6 +394,7 @@ PyObject *py_uwsgi_register_rpc(PyObject * self, PyObject * args) {
 		return NULL;
 	}
 
+	Py_INCREF(func);
 
 	if (uwsgi_register_rpc(name, &python_plugin, argc, func)) {
 		return PyErr_Format(PyExc_ValueError, "unable to register rpc function");
@@ -497,6 +498,8 @@ PyObject *py_uwsgi_register_signal(PyObject * self, PyObject * args) {
 	if (!PyArg_ParseTuple(args, "BsO:register_signal", &uwsgi_signal, &signal_kind, &handler)) {
 		return NULL;
 	}
+
+	Py_INCREF(handler);
 
 	if (uwsgi_register_signal(uwsgi_signal, signal_kind, handler, 0)) {
 		return PyErr_Format(PyExc_ValueError, "unable to register signal");
@@ -3109,6 +3112,35 @@ PyObject *py_uwsgi_cache_num(PyObject * self, PyObject * args) {
 
 }
 
+PyObject *py_uwsgi_cache_keys(PyObject * self, PyObject * args) {
+	char *cache = NULL;
+        struct uwsgi_cache_item *uci = NULL;
+        uint64_t pos = 0;
+
+        if (!PyArg_ParseTuple(args, "|s:cache_keys", &cache)) {
+                return NULL;
+        }
+
+	struct uwsgi_cache *uc = uwsgi_cache_by_name(cache);
+	if (!uc) {
+		return PyErr_Format(PyExc_ValueError, "no local uWSGI cache available");
+	}
+
+	PyObject *l = PyList_New(0);
+
+	uwsgi_rlock(uc->lock);
+        for(;;) {
+                uci = uwsgi_cache_keys(uc, &pos, &uci);
+                if (!uci) break;
+		PyObject *ci = PyString_FromStringAndSize(uci->key, uci->keysize);
+		PyList_Append(l, ci);
+		Py_DECREF(ci);
+        }
+	uwsgi_rwunlock(uc->lock);
+	return l;
+}
+
+
 static PyMethodDef uwsgi_cache_methods[] = {
 	{"cache_get", py_uwsgi_cache_get, METH_VARARGS, ""},
 	{"cache_set", py_uwsgi_cache_set, METH_VARARGS, ""},
@@ -3121,6 +3153,7 @@ static PyMethodDef uwsgi_cache_methods[] = {
 	{"cache_mul", py_uwsgi_cache_mul, METH_VARARGS, ""},
 	{"cache_div", py_uwsgi_cache_div, METH_VARARGS, ""},
 	{"cache_num", py_uwsgi_cache_num, METH_VARARGS, ""},
+	{"cache_keys", py_uwsgi_cache_keys, METH_VARARGS, ""},
 	{NULL, NULL},
 };
 

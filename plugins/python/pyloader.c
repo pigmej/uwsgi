@@ -167,7 +167,7 @@ int init_uwsgi_app(int loader, void *arg1, struct wsgi_request *wsgi_req, PyThre
 		PyThreadState_Swap(wi->interpreter);
 		init_pyargv();
 
-		// we need to inizialize an embedded module for every interpreter
+		// we need to initialize an embedded module for every interpreter
 		init_uwsgi_embedded_module();
 		init_uwsgi_vars();
 
@@ -205,7 +205,7 @@ int init_uwsgi_app(int loader, void *arg1, struct wsgi_request *wsgi_req, PyThre
 		app_list = PyDict_Keys(applications);
 		multiapp = PyList_Size(app_list);
 		if (multiapp < 1) {
-			uwsgi_log("you have to define at least one app in the apllications dictionary\n");
+			uwsgi_log("you have to define at least one app in the applications dictionary\n");
 			goto doh;
 		}		
 
@@ -227,6 +227,10 @@ int init_uwsgi_app(int loader, void *arg1, struct wsgi_request *wsgi_req, PyThre
 			PyObject *callables_dict = get_uwsgi_pydict((char *)arg1);
 			if (callables_dict) {
 				wi->callable = PyDict_GetItem(callables_dict, (PyObject *)wi->callable);	
+				if (!wi->callable) {
+					uwsgi_log("skipping broken app %s\n", wsgi_req->appid);
+					goto multiapp;
+				}
 			}
 		}
 	}
@@ -336,9 +340,11 @@ int init_uwsgi_app(int loader, void *arg1, struct wsgi_request *wsgi_req, PyThre
 
 	const char *default_app = "";
 
-	if ((wsgi_req->appid_len == 0 || (wsgi_req->appid_len = 1 && wsgi_req->appid[0] == '/')) && uwsgi.default_app == -1) {
-		default_app = " (default app)" ;
-		uwsgi.default_app = id;
+	if (!uwsgi.no_default_app) {
+		if ((wsgi_req->appid_len == 0 || (wsgi_req->appid_len = 1 && wsgi_req->appid[0] == '/')) && uwsgi.default_app == -1) {
+			default_app = " (default app)" ;
+			uwsgi.default_app = id;
+		}
 	}
 
 	wi->started_at = now;
@@ -357,6 +363,7 @@ int init_uwsgi_app(int loader, void *arg1, struct wsgi_request *wsgi_req, PyThre
 
 	uwsgi_apps_cnt++;
 
+multiapp:
 	if (multiapp > 1) {
 		for(i=1;i<multiapp;i++) {
 			PyObject *app_mnt = PyList_GetItem(app_list, i);		
@@ -607,6 +614,52 @@ PyObject *uwsgi_file_loader(void *arg1) {
 
 }
 
+PyObject *uwsgi_pecan_loader(void *arg1) {
+
+	char *pecan = (char *) arg1;
+	PyObject *pecan_module, *pecan_dict, *pecan_deploy;
+	PyObject *pecan_arg, *pecan_app;
+
+	uwsgi_log( "Loading pecan environment: %s\n", pecan);
+
+	pecan_module = PyImport_ImportModule("pecan.deploy");
+	if (!pecan_module) {
+		PyErr_Print();
+		exit(UWSGI_FAILED_APP_CODE);
+	}
+
+	pecan_dict = PyModule_GetDict(pecan_module);
+	if (!pecan_dict) {
+		PyErr_Print();
+		exit(UWSGI_FAILED_APP_CODE);
+	}
+
+	pecan_deploy = PyDict_GetItemString(pecan_dict, "deploy");
+	if (!pecan_deploy) {
+		PyErr_Print();
+		exit(UWSGI_FAILED_APP_CODE);
+	}
+
+	pecan_arg = PyTuple_New(1);
+	if (!pecan_arg) {
+		PyErr_Print();
+		exit(UWSGI_FAILED_APP_CODE);
+	}
+
+	if (PyTuple_SetItem(pecan_arg, 0, UWSGI_PYFROMSTRING(pecan))) {
+		PyErr_Print();
+		exit(UWSGI_FAILED_APP_CODE);
+	}
+
+	pecan_app = PyEval_CallObject(pecan_deploy, pecan_arg);
+	if (!pecan_app) {
+		PyErr_Print();
+		exit(UWSGI_FAILED_APP_CODE);
+	}
+
+	return pecan_app;
+}
+
 PyObject *uwsgi_paste_loader(void *arg1) {
 
 	char *paste = (char *) arg1;
@@ -667,7 +720,6 @@ PyObject *uwsgi_paste_loader(void *arg1) {
 		PyErr_Print();
 		exit(UWSGI_FAILED_APP_CODE);
 	}
-
 
 	return paste_app;
 }

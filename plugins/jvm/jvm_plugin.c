@@ -127,7 +127,7 @@ JNIEXPORT jobject JNICALL uwsgi_jvm_api_rpc(JNIEnv *env, jclass c, jobject j_arg
 	char *argv[256];
         uint16_t argvs[256];
 	jobject argvj[256];
-	uint16_t size = 0;
+	uint64_t size = 0;
 
 	size_t args = uwsgi_jvm_array_len(j_args);
 	if (args < 2) return NULL;
@@ -896,6 +896,19 @@ jobject uwsgi_jvm_num(long num) {
 	return o;
 }
 
+jobject uwsgi_jvm_bool(long b) {
+        static jmethodID mid = 0;
+        if (!mid) {
+                mid = uwsgi_jvm_get_method_id(ujvm.int_class, "<init>", "(I)V");
+                if (!mid) return NULL;
+        }
+        jobject o = (*ujvm_env)->NewObject(ujvm_env, ujvm.bool_class, mid, b);
+        if (uwsgi_jvm_exception()) {
+                return NULL;
+        }
+        return o;
+}
+
 jobject uwsgi_jvm_str(char *str, size_t len) {
 	jobject new_str;
 	if (len > 0) {
@@ -1063,6 +1076,9 @@ static void uwsgi_jvm_create(void) {
 	ujvm.int_class = uwsgi_jvm_class("java/lang/Integer");
 	if (!ujvm.int_class) exit(1);
 
+	ujvm.bool_class = uwsgi_jvm_class("java/lang/Boolean");
+	if (!ujvm.bool_class) exit(1);
+
 	ujvm.long_class = uwsgi_jvm_class("java/lang/Long");
 	if (!ujvm.long_class) exit(1);
 
@@ -1116,7 +1132,7 @@ static void uwsgi_jvm_create(void) {
 			jobject j_opt_value = uwsgi_jvm_hashmap_get(opt_hm, (jobject) j_opt_key);
 			if (uwsgi_jvm_object_is_instance(j_opt_value, ujvm.list_class)) {
 				if (uwsgi.exported_opts[j]->value == NULL) {
-                                        uwsgi_jvm_list_add(j_opt_value, (jobject) 1);
+                                        uwsgi_jvm_list_add(j_opt_value, uwsgi_jvm_bool(JNI_TRUE));
                                 }
                                 else {
                                         uwsgi_jvm_list_add(j_opt_value, uwsgi_jvm_str(uwsgi.exported_opts[j]->value, 0));
@@ -1126,7 +1142,7 @@ static void uwsgi_jvm_create(void) {
 				jobject ll = uwsgi_jvm_list();
 				uwsgi_jvm_list_add(ll, j_opt_value);
 				if (uwsgi.exported_opts[j]->value == NULL) {
-					uwsgi_jvm_list_add(ll, (jobject) 1);
+					uwsgi_jvm_list_add(ll, uwsgi_jvm_bool(JNI_TRUE));
 				}
 				else {
 					uwsgi_jvm_list_add(ll, uwsgi_jvm_str(uwsgi.exported_opts[j]->value, 0));
@@ -1136,7 +1152,7 @@ static void uwsgi_jvm_create(void) {
 		}
 		else {
 			if (uwsgi.exported_opts[j]->value == NULL) {
-				uwsgi_jvm_hashmap_put(opt_hm, j_opt_key, (jobject) 1);
+				uwsgi_jvm_hashmap_put(opt_hm, j_opt_key, uwsgi_jvm_bool(JNI_TRUE));
 			}
 			else {
 				uwsgi_jvm_hashmap_put(opt_hm, j_opt_key, uwsgi_jvm_str(uwsgi.exported_opts[j]->value, 0));
@@ -1261,7 +1277,7 @@ void uwsgi_jvm_release_bytearray(jobject o, char *str) {
 	(*ujvm_env)->ReleaseByteArrayElements(ujvm_env, o, (jbyte *)str, 0);
 }
 
-static uint16_t uwsgi_jvm_rpc(void *func, uint8_t argc, char **argv, uint16_t argvs[], char *buffer) {
+static uint64_t uwsgi_jvm_rpc(void *func, uint8_t argc, char **argv, uint16_t argvs[], char **buffer) {
 	jvalue args[1];
 	jobject str_array = (*ujvm_env)->NewObjectArray(ujvm_env, argc, ujvm.str_class, NULL);
 	if (!str_array) return 0;
@@ -1278,9 +1294,10 @@ static uint16_t uwsgi_jvm_rpc(void *func, uint8_t argc, char **argv, uint16_t ar
 		return 0;
 	}
 	size_t rlen = uwsgi_jvm_strlen(ret);
-	if (rlen <= 0xffff) {
+	if (rlen > 0) {
+		*buffer = uwsgi_malloc(rlen);
 		char *b = uwsgi_jvm_str2c(ret);
-		memcpy(buffer, b, rlen);
+		memcpy(*buffer, b, rlen);
 		uwsgi_jvm_release_chars(ret, b);
 		uwsgi_jvm_local_unref(ret);
 		return rlen;

@@ -12,8 +12,8 @@ static void uwsgi_opt_setup_coroae(char *opt, char *value, void *null) {
 
         // set async mode
         uwsgi_opt_set_int(opt, value, &uwsgi.async);
-        if (uwsgi.shared->options[UWSGI_OPTION_SOCKET_TIMEOUT] < 30) {
-                uwsgi.shared->options[UWSGI_OPTION_SOCKET_TIMEOUT] = 30;
+        if (uwsgi.socket_timeout < 30) {
+                uwsgi.socket_timeout = 30;
         }
         // set loop engine
         uwsgi.loop = "coroae";
@@ -51,7 +51,7 @@ SV * coroae_coro_new(CV *block) {
         XPUSHs(sv_2mortal(newSVpv( "Coro", 4)));
         XPUSHs(newRV_inc((SV *)block));
         PUTBACK;
-        call_method("new", G_SCALAR);
+        call_method("new", G_SCALAR|G_EVAL);
         SPAGAIN;
         if(SvTRUE(ERRSV)) {
                 uwsgi_log("[uwsgi-perl error] %s", SvPV_nolen(ERRSV));
@@ -65,6 +65,33 @@ SV * coroae_coro_new(CV *block) {
 	return newobj;
 }
 
+static int coroae_wait_milliseconds(int timeout) {
+        int ret = -1;
+        dSP;
+        ENTER;
+        SAVETMPS;
+        PUSHMARK(SP);
+        XPUSHs(newSVnv(((double)timeout)/1000.0));
+        PUTBACK;
+        call_pv("Coro::AnyEvent::sleep", G_SCALAR|G_EVAL);
+        SPAGAIN;
+        if(SvTRUE(ERRSV)) {
+                uwsgi_log("[uwsgi-perl error] %s", SvPV_nolen(ERRSV));
+        }
+        else {
+                SV *p_ret = POPs;
+                if (SvTRUE(p_ret)) {
+                        ret = 0;
+                }
+        }
+        PUTBACK;
+        FREETMPS;
+        LEAVE;
+
+        return ret;
+}
+
+
 static int coroae_wait_fd_read(int fd, int timeout) {
 	int ret = 0;
 	dSP;
@@ -74,7 +101,7 @@ static int coroae_wait_fd_read(int fd, int timeout) {
         XPUSHs(newSViv(fd));
         XPUSHs(newSViv(timeout));
         PUTBACK;
-        call_pv("Coro::AnyEvent::readable", G_SCALAR);
+        call_pv("Coro::AnyEvent::readable", G_SCALAR|G_EVAL);
         SPAGAIN;
         if(SvTRUE(ERRSV)) {
                 uwsgi_log("[uwsgi-perl error] %s", SvPV_nolen(ERRSV));
@@ -101,13 +128,14 @@ static int coroae_wait_fd_write(int fd, int timeout) {
         XPUSHs(sv_2mortal(newSViv(fd)));
         XPUSHs(sv_2mortal(newSViv(timeout)));
         PUTBACK;
-        call_pv("Coro::AnyEvent::writable", G_SCALAR);
+        call_pv("Coro::AnyEvent::writable", G_SCALAR|G_EVAL);
         SPAGAIN;
         if(SvTRUE(ERRSV)) {
                 uwsgi_log("[uwsgi-perl error] %s", SvPV_nolen(ERRSV));
         }
 	else {
-		if (SvTRUE(POPs)) {
+		SV *p_ret = POPs;	
+		if (SvTRUE(p_ret)) {
 			ret = 1;
 		}
 	}
@@ -136,7 +164,7 @@ XS(XS_coroae_accept_request) {
         }
 
 	for(;;) {
-		int ret = uwsgi.wait_read_hook(wsgi_req->fd, uwsgi.shared->options[UWSGI_OPTION_SOCKET_TIMEOUT]);
+		int ret = uwsgi.wait_read_hook(wsgi_req->fd, uwsgi.socket_timeout);
 		wsgi_req->switches++;
 	
 		if (ret <= 0) {
@@ -201,22 +229,25 @@ edge:
         // mark core as used
         uwsgi.workers[uwsgi.mywid].cores[wsgi_req->async_id].in_request = 1;
 
-        wsgi_req->start_of_request = uwsgi_micros();
-        wsgi_req->start_of_request_in_sec = wsgi_req->start_of_request/1000000;
-
-        // enter harakiri mode
-        if (uwsgi.shared->options[UWSGI_OPTION_HARAKIRI] > 0) {
-                set_harakiri(uwsgi.shared->options[UWSGI_OPTION_HARAKIRI]);
-        }
-
 	// accept the connection
         if (wsgi_req_simple_accept(wsgi_req, uwsgi_sock->fd)) {
                 free_req_queue;
                 if (uwsgi_sock->retry && uwsgi_sock->retry[wsgi_req->async_id]) {
                         goto edge;
                 }
+		// in case of errors (or thundering herd, just rest it)
+                uwsgi.workers[uwsgi.mywid].cores[wsgi_req->async_id].in_request = 0;
                 goto clear;
         }
+
+	wsgi_req->start_of_request = uwsgi_micros();
+        wsgi_req->start_of_request_in_sec = wsgi_req->start_of_request/1000000;
+
+        // enter harakiri mode
+        if (uwsgi.harakiri_options.workers > 0) {
+                set_harakiri(uwsgi.harakiri_options.workers);
+        }
+
 
 	// here we spawn an async {} block
 	CV *async_xs_call = newXS(NULL, XS_coroae_accept_request, "uwsgi::coroae");
@@ -272,7 +303,7 @@ static SV *coroae_add_watcher(int fd, SV *cb) {
         XPUSHs(newRV_inc(cb));
         PUTBACK;
 
-        call_method( "io", G_SCALAR);
+        call_method( "io", G_SCALAR|G_EVAL);
 
         SPAGAIN;
 	if(SvTRUE(ERRSV)) {
@@ -303,7 +334,7 @@ static SV *coroae_condvar_new() {
         XPUSHs(sv_2mortal(newSVpv( "AnyEvent", 8)));
         PUTBACK;
 
-        call_method( "condvar", G_SCALAR);
+        call_method( "condvar", G_SCALAR|G_EVAL);
 
         SPAGAIN;
         if(SvTRUE(ERRSV)) {
@@ -329,7 +360,7 @@ static void coroae_wait_condvar(SV *cv) {
         XPUSHs(cv);
         PUTBACK;
 
-        call_method( "recv", G_DISCARD);
+        call_method( "recv", G_DISCARD|G_EVAL);
 
         SPAGAIN;
         if(SvTRUE(ERRSV)) {
@@ -374,6 +405,7 @@ static void coroae_loop() {
 	uwsgi.current_wsgi_req = coroae_current_wsgi_req;
 	uwsgi.wait_write_hook = coroae_wait_fd_write;
         uwsgi.wait_read_hook = coroae_wait_fd_read;
+        uwsgi.wait_milliseconds_hook = coroae_wait_milliseconds;
 
 	I_CORO_API("uwsgi::coroae");
 

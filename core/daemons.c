@@ -6,7 +6,7 @@ extern struct uwsgi_server uwsgi;
 
 	External uwsgi daemons
 
-	There are 3 kind of daemons (read: external applications) that can be managed
+	There are 3 kinds of daemons (read: external applications) that can be managed
 	by uWSGI.
 
 	1) dumb daemons (attached with --attach-daemon)
@@ -14,12 +14,12 @@ extern struct uwsgi_server uwsgi;
 		and the process is respawned
 	2) smart daemons with daemonization
 		you specify a pidfile and a command
-		- on startup - if the pidfile does not exists or contains a not-available pid (checked with kill(pid, 0))
-		the daemon is respawned
-		- on master ckeck - if the pidfile does not exist or if it point to a non-existent pid
-                the daemon is respawned
+		- on startup - if the pidfile does not exist or contains a non-available pid (checked with kill(pid, 0))
+		  the daemon is respawned
+		- on master check - if the pidfile does not exist or if it points to a non-existent pid
+		  the daemon is respawned
 	3) smart daemons without daemonization
-		same as 2, but the daemonization and pidfile creation is managed by uWSGI
+		same as 2, but the daemonization and pidfile creation are managed by uWSGI
 
 	status:
 
@@ -55,7 +55,7 @@ void uwsgi_daemons_smart_check() {
 				if (ud->pid > 0) {
 					if (!kill(ud->pid, 0)) {
 						uwsgi_log("[uwsgi_daemons] stopping legion \"%s\" daemon: %s (pid: %d)\n", ud->legion, ud->command, ud->pid);
-						kill(-ud->pid, SIGTERM);
+						kill(-ud->pid, ud->stop_signal);
 					}
 					else {
 						// pid already died
@@ -77,8 +77,14 @@ void uwsgi_daemons_smart_check() {
 				else {
 					ud->pidfile_checks++;
 					if (ud->pidfile_checks >= (unsigned int) ud->freq) {
-						uwsgi_log("[uwsgi-daemons] found changed pidfile for \"%s\" (old_pid: %d new_pid: %d)\n", ud->command, (int) ud->pid, (int) checked_pid);
-						uwsgi_spawn_daemon(ud);
+						if (!ud->has_daemonized) {
+							uwsgi_log_verbose("[uwsgi-daemons] \"%s\" (pid: %d) did not daemonize !!!\n", ud->command, (int) ud->pid);
+							ud->pidfile_checks = 0;
+						}
+						else {
+							uwsgi_log("[uwsgi-daemons] found changed pidfile for \"%s\" (old_pid: %d new_pid: %d)\n", ud->command, (int) ud->pid, (int) checked_pid);
+							uwsgi_spawn_daemon(ud);
+						}
 					}
 				}
 			}
@@ -99,10 +105,20 @@ void uwsgi_daemons_smart_check() {
 int uwsgi_daemon_check_pid_death(pid_t diedpid) {
 	struct uwsgi_daemon *ud = uwsgi.daemons;
 	while (ud) {
-		if (ud->pid == diedpid && !ud->pidfile) {
-			uwsgi_log("daemon \"%s\" (pid: %d) annihilated\n", ud->command, (int) diedpid);
-			ud->pid = -1;
-			return -1;
+		if (ud->pid == diedpid) {
+			if (!ud->pidfile) {
+				uwsgi_log("daemon \"%s\" (pid: %d) annihilated\n", ud->command, (int) diedpid);
+				ud->pid = -1;
+				return -1;
+			}
+			else {
+				if (!ud->has_daemonized) {
+					ud->has_daemonized = 1;
+				}
+				else {
+					uwsgi_log("[uwsgi-daemons] BUG !!! daemon \"%s\" has already daemonized !!!\n", ud->command);
+				}
+			}
 		}
 		ud = ud->next;
 	}
@@ -123,6 +139,10 @@ int uwsgi_daemon_check_pid_reload(pid_t diedpid) {
 		}
 #endif
 		if (ud->pid == diedpid && !ud->pidfile) {
+			if (ud->control) {
+				gracefully_kill_them_all(0);
+				return 0;
+			}
 			uwsgi_spawn_daemon(ud);
 			return 1;
 		}
@@ -212,14 +232,16 @@ void uwsgi_detach_daemons() {
 		if (ud->pid > 0 && !ud->pidfile) {
 #endif
 			uwsgi_log("[uwsgi-daemons] stopping daemon (pid: %d): %s\n", (int) ud->pid, ud->command);
-			// try to gracefully stop daemon, kill it if it won't die
-			// if mercy is not set than wait up to 3 seconds
+			// try to stop daemon gracefully, kill it if it won't die
+			// if mercy is not set then wait up to 3 seconds
 			time_t timeout = uwsgi_now() + (uwsgi.reload_mercy ? uwsgi.reload_mercy : 3);
+			int waitpid_status;
 			while (!kill(ud->pid, 0)) {
-				kill(-ud->pid, SIGTERM);
+				kill(-ud->pid, ud->stop_signal);
 				sleep(1);
+				waitpid(-ud->pid, &waitpid_status, WNOHANG);
 				if (uwsgi_now() >= timeout) {
-					uwsgi_log("[uwsgi-daemons] daemon did not died in time, killing (pid: %d): %s\n", (int) ud->pid, ud->command);
+					uwsgi_log("[uwsgi-daemons] daemon did not die in time, killing (pid: %d): %s\n", (int) ud->pid, ud->command);
 					kill(-ud->pid, SIGKILL);
 					break;
 				}
@@ -237,11 +259,12 @@ void uwsgi_spawn_daemon(struct uwsgi_daemon *ud) {
 	// skip unregistered daemons
 	if (!ud->registered) return;
 
-	int devnull = -1;
 	int throttle = 0;
 
 	if (uwsgi.current_time - ud->last_spawn <= 3) {
 		throttle = ud->respawns - (uwsgi.current_time - ud->last_spawn);
+		// if ud->respawns == 0 then we can end up with throttle < 0
+		if (throttle <= 0) throttle = 1;
 	}
 
 	pid_t pid = uwsgi_fork("uWSGI external daemon");
@@ -251,6 +274,7 @@ void uwsgi_spawn_daemon(struct uwsgi_daemon *ud) {
 	}
 
 	if (pid > 0) {
+		ud->has_daemonized = 0;
 		ud->pid = pid;
 		ud->status = 1;
 		ud->pidfile_checks = 0;
@@ -267,6 +291,20 @@ void uwsgi_spawn_daemon(struct uwsgi_daemon *ud) {
 		uwsgi_close_all_sockets();
 		uwsgi_close_all_fds();
 
+		if (ud->gid) {
+			if (setgid(ud->gid)) {
+				uwsgi_error("uwsgi_spawn_daemon()/setgid()");
+				exit(1);
+			}
+		}
+
+		if (ud->uid) {
+			if (setuid(ud->uid)) {
+				uwsgi_error("uwsgi_spawn_daemon()/setuid()");
+				exit(1);
+			}
+		}
+
 		if (ud->daemonize) {
 			/* refork... */
 			pid = fork();
@@ -280,20 +318,9 @@ void uwsgi_spawn_daemon(struct uwsgi_daemon *ud) {
 			uwsgi_write_pidfile(ud->pidfile);
 		}
 
-		if (!uwsgi.daemons_honour_stdin) {
+		if (!uwsgi.daemons_honour_stdin && !ud->honour_stdin) {
 			// /dev/null will became stdin
-			devnull = open("/dev/null", O_RDONLY);
-			if (devnull < 0) {
-				uwsgi_error("/dev/null open()");
-				exit(1);
-			}
-			if (devnull != 0) {
-				if (dup2(devnull, 0) < 0) {
-					uwsgi_error("dup2()");
-					exit(1);
-				}
-				close(devnull);
-			}
+			uwsgi_remap_fd(0, "/dev/null");
 		}
 
 		if (setsid() < 0) {
@@ -312,10 +339,10 @@ void uwsgi_spawn_daemon(struct uwsgi_daemon *ud) {
 
 		if (throttle) {
 			uwsgi_log("[uwsgi-daemons] throttling \"%s\" for %d seconds\n", ud->command, throttle);
-			sleep(throttle);
+			sleep((unsigned int) throttle);
 		}
 
-		uwsgi_log("[uwsgi-daemons] %sspawning \"%s\"\n", ud->respawns > 0 ? "re" : "", ud->command);
+		uwsgi_log("[uwsgi-daemons] %sspawning \"%s\" (uid: %d gid: %d)\n", ud->respawns > 0 ? "re" : "", ud->command, (int) getuid(), (int) getgid());
 		uwsgi_exec_command_with_args(ud->command);
 		uwsgi_log("[uwsgi-daemons] unable to spawn \"%s\"\n", ud->command);
 
@@ -334,6 +361,8 @@ void uwsgi_opt_add_daemon(char *opt, char *value, void *none) {
 	int daemonize = 0;
 	int freq = 10;
 	char *space = NULL;
+	int stop_signal = SIGTERM;
+	int reload_signal = 0;
 
 	char *command = uwsgi_str(value);
 
@@ -372,7 +401,7 @@ void uwsgi_opt_add_daemon(char *opt, char *value, void *none) {
 	}
 
 	if (!uwsgi_ud) {
-		uwsgi.daemons = uwsgi_malloc(sizeof(struct uwsgi_daemon));
+		uwsgi.daemons = uwsgi_calloc(sizeof(struct uwsgi_daemon));
 		uwsgi_ud = uwsgi.daemons;
 	}
 	else {
@@ -381,7 +410,7 @@ void uwsgi_opt_add_daemon(char *opt, char *value, void *none) {
 			uwsgi_ud = uwsgi_ud->next;
 		}
 
-		uwsgi_ud = uwsgi_malloc(sizeof(struct uwsgi_daemon));
+		uwsgi_ud = uwsgi_calloc(sizeof(struct uwsgi_daemon));
 		old_ud->next = uwsgi_ud;
 	}
 
@@ -395,6 +424,12 @@ void uwsgi_opt_add_daemon(char *opt, char *value, void *none) {
 	uwsgi_ud->last_spawn = 0;
 	uwsgi_ud->daemonize = daemonize;
 	uwsgi_ud->pidfile = pidfile;
+	uwsgi_ud->control = 0;
+	uwsgi_ud->stop_signal = stop_signal;
+	uwsgi_ud->reload_signal = reload_signal;
+	if (!strcmp(opt, "attach-control-daemon")) {
+		uwsgi_ud->control = 1;
+	}
 #ifdef UWSGI_SSL
 	uwsgi_ud->legion = legion;
 #endif
@@ -402,3 +437,101 @@ void uwsgi_opt_add_daemon(char *opt, char *value, void *none) {
 	uwsgi.daemons_cnt++;
 
 }
+
+void uwsgi_opt_add_daemon2(char *opt, char *value, void *none) {
+
+        struct uwsgi_daemon *uwsgi_ud = uwsgi.daemons, *old_ud;
+
+	char *d_command = NULL;
+	char *d_freq = NULL;
+	char *d_pidfile = NULL;
+	char *d_control = NULL;
+	char *d_legion = NULL;
+	char *d_daemonize = NULL;
+	char *d_touch = NULL;
+	char *d_stopsignal = NULL;
+	char *d_reloadsignal = NULL;
+	char *d_stdin = NULL;
+	char *d_uid = NULL;
+	char *d_gid = NULL;
+
+	char *arg = uwsgi_str(value);
+
+	if (uwsgi_kvlist_parse(arg, strlen(arg), ',', '=',
+		"command", &d_command,	
+		"cmd", &d_command,	
+		"exec", &d_command,	
+		"freq", &d_freq,	
+		"pidfile", &d_pidfile,	
+		"control", &d_control,	
+		"daemonize", &d_daemonize,	
+		"daemon", &d_daemonize,	
+		"touch", &d_touch,	
+		"stopsignal", &d_stopsignal,	
+		"stop_signal", &d_stopsignal,	
+		"reloadsignal", &d_reloadsignal,	
+		"reload_signal", &d_reloadsignal,	
+		"stdin", &d_stdin,	
+		"uid", &d_uid,	
+		"gid", &d_gid,	
+	NULL)) {
+		uwsgi_log("invalid --%s keyval syntax\n", opt);
+		exit(1);
+	}
+
+	if (!d_command) {
+		uwsgi_log("--%s: you need to specify a 'command' key\n", opt);
+		exit(1);
+	}
+
+#ifndef UWSGI_SSL
+	if (d_legion) {
+		uwsgi_log("legion subsystem is not supported on this uWSGI version, rebuild with ssl support\n");
+		exit(1);
+	}
+#endif
+
+
+
+        if (!uwsgi_ud) {
+                uwsgi.daemons = uwsgi_calloc(sizeof(struct uwsgi_daemon));
+                uwsgi_ud = uwsgi.daemons;
+        }
+        else {
+                while (uwsgi_ud) {
+                        old_ud = uwsgi_ud;
+                        uwsgi_ud = uwsgi_ud->next;
+                }
+
+                uwsgi_ud = uwsgi_calloc(sizeof(struct uwsgi_daemon));
+                old_ud->next = uwsgi_ud;
+        }
+        uwsgi_ud->command = d_command;
+        uwsgi_ud->freq = d_freq ? atoi(d_freq) : 10;
+        uwsgi_ud->daemonize = d_daemonize ? 1 : 0;
+        uwsgi_ud->pidfile = d_pidfile;
+        uwsgi_ud->stop_signal = d_stopsignal ? atoi(d_stopsignal) : SIGTERM;
+        uwsgi_ud->reload_signal = d_reloadsignal ? atoi(d_reloadsignal) : 0;
+        uwsgi_ud->control = d_control ? 1 : 0;
+	uwsgi_ud->uid = d_uid ? atoi(d_uid) : 0;
+	uwsgi_ud->gid = d_gid ? atoi(d_gid) : 0;
+	uwsgi_ud->honour_stdin = d_stdin ? 1 : 0;
+#ifdef UWSGI_SSL
+        uwsgi_ud->legion = d_legion;
+#endif
+
+	if (d_touch) {
+		size_t i,rlen = 0;
+		char **argv = uwsgi_split_quoted(d_touch, strlen(d_touch), ";", &rlen);
+		for(i=0;i<rlen;i++) {	
+			uwsgi_string_new_list(&uwsgi_ud->touch, argv[i]);
+		}
+		if (argv) free(argv);
+	}
+
+        uwsgi.daemons_cnt++;
+
+	free(arg);
+
+}
+

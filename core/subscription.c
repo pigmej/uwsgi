@@ -20,6 +20,51 @@
 
 extern struct uwsgi_server uwsgi;
 
+#ifdef UWSGI_SSL
+static void uwsgi_subscription_sni_check(struct uwsgi_subscribe_slot *current_slot, struct uwsgi_subscribe_req *usr) {
+	if (usr->sni_key_len > 0 && usr->sni_crt_len > 0) {
+                        if (!current_slot->sni_enabled) {
+                                char *sni_key = uwsgi_concat2n(usr->sni_key, usr->sni_key_len, "", 0);
+                                char *sni_crt = uwsgi_concat2n(usr->sni_crt, usr->sni_crt_len, "", 0);
+                                char *sni_ca = NULL;
+                                if (usr->sni_ca_len > 0) {
+                                        sni_ca = uwsgi_concat2n(usr->sni_ca, usr->sni_ca_len, "", 0);
+                                }
+				char *servername = NULL;
+				char *colon = memchr(current_slot->key, ':', current_slot->keylen);
+				if (colon) {
+					servername = uwsgi_concat2n(current_slot->key, colon-current_slot->key, "", 0);
+				}
+				else {
+					servername = uwsgi_concat2n(current_slot->key, current_slot->keylen, "", 0);
+				}
+                                if (uwsgi_ssl_add_sni_item(servername, sni_crt, sni_key, uwsgi.sni_dir_ciphers , sni_ca)) {
+                                        current_slot->sni_enabled = 1;
+                                }
+                                if (sni_key) free(sni_key);
+                                if (sni_crt) free(sni_crt);
+                                if (sni_ca) free(sni_ca);
+                        }
+                }
+}
+#endif
+
+int uwsgi_subscription_credentials_check(struct uwsgi_subscribe_slot *slot, struct uwsgi_subscribe_req *usr) {
+        struct uwsgi_string_list *usl = NULL;
+        uwsgi_foreach(usl, uwsgi.subscriptions_credentials_check_dir) {
+                char *filename = uwsgi_concat2n(usl->value, usl->len, slot->key, slot->keylen);
+                struct stat st;
+                int ret = stat(filename, &st);
+                free(filename);
+                if (ret != 0) continue;
+                if (st.st_uid != usr->uid) continue;
+                if (st.st_gid != usr->gid) continue;
+                // accepted...
+                return 1;
+        }
+        return 0;
+}
+
 struct uwsgi_subscribe_slot *uwsgi_get_subscribe_slot(struct uwsgi_subscribe_slot **slot, char *key, uint16_t keylen) {
 
 	if (keylen > 0xff)
@@ -305,6 +350,12 @@ int uwsgi_remove_subscribe_node(struct uwsgi_subscribe_slot **slot, struct uwsgi
 				EVP_PKEY_free(node_slot->sign_public_key);
 				EVP_MD_CTX_destroy(node_slot->sign_ctx);
 			}
+#ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
+			// if there is a SNI context active, destroy it
+			if (node_slot->sni_enabled) {
+				uwsgi_ssl_del_sni_item(node_slot->key, node_slot->keylen);
+			}
+#endif
 #endif
 			free(node_slot);
 			slot[hash_key] = NULL;
@@ -358,6 +409,11 @@ struct uwsgi_subscribe_node *uwsgi_add_subscribe_node(struct uwsgi_subscribe_slo
 			return NULL;
 		}
 #endif
+
+		if (uwsgi.subscriptions_credentials_check_dir && !uwsgi_subscription_credentials_check(current_slot, usr)) {
+			return NULL;
+		}
+
 		node = current_slot->nodes;
 		while (node) {
 			if (!uwsgi_strncmp(node->name, node->len, usr->address, usr->address_len)) {
@@ -388,6 +444,8 @@ struct uwsgi_subscribe_node *uwsgi_add_subscribe_node(struct uwsgi_subscribe_slo
 			uwsgi_log("[uwsgi-subscription for pid %d] invalid (sniffed ?) packet sent for slot: %.*s node: %.*s unix_check: %lu\n", (int) uwsgi.mypid, usr->keylen, usr->key, usr->address_len, usr->address, (unsigned long) usr->unix_check);
 			return NULL;
 		}
+		// check here as we are sure the node will be added
+                uwsgi_subscription_sni_check(current_slot, usr);
 #endif
 
 		node = uwsgi_malloc(sizeof(struct uwsgi_subscribe_node));
@@ -396,7 +454,8 @@ struct uwsgi_subscribe_node *uwsgi_add_subscribe_node(struct uwsgi_subscribe_slo
 		node->modifier2 = usr->modifier2;
 		node->requests = 0;
 		node->last_requests = 0;
-		node->transferred = 0;
+		node->tx = 0;
+		node->rx = 0;
 		node->reference = 0;
 		node->death_mark = 0;
 		node->failcnt = 0;
@@ -407,6 +466,9 @@ struct uwsgi_subscribe_node *uwsgi_add_subscribe_node(struct uwsgi_subscribe_slo
 		if (!node->weight)
 			node->weight = 1;
 		node->wrr = 0;
+		node->pid = usr->pid;
+		node->uid = usr->uid;
+		node->gid = usr->gid;
 		node->last_check = uwsgi_now();
 		node->slot = current_slot;
 		memcpy(node->name, usr->address, usr->address_len);
@@ -464,16 +526,27 @@ struct uwsgi_subscribe_node *uwsgi_add_subscribe_node(struct uwsgi_subscribe_slo
 #endif
 		current_slot->keylen = usr->keylen;
 		memcpy(current_slot->key, usr->key, usr->keylen);
+		if (uwsgi.subscriptions_credentials_check_dir) {
+			if (!uwsgi_subscription_credentials_check(current_slot, usr)) {
+				free(current_slot);
+				return NULL;
+			}
+		}
+
 		current_slot->key[usr->keylen] = 0;
 		current_slot->hits = 0;
-
+#ifdef UWSGI_SSL
+		current_slot->sni_enabled = 0;
+		uwsgi_subscription_sni_check(current_slot, usr);
+#endif
 		current_slot->nodes = uwsgi_malloc(sizeof(struct uwsgi_subscribe_node));
 		current_slot->nodes->slot = current_slot;
 		current_slot->nodes->len = usr->address_len;
 		current_slot->nodes->reference = 0;
 		current_slot->nodes->requests = 0;
 		current_slot->nodes->last_requests = 0;
-		current_slot->nodes->transferred = 0;
+		current_slot->nodes->tx = 0;
+		current_slot->nodes->rx = 0;
 		current_slot->nodes->death_mark = 0;
 		current_slot->nodes->failcnt = 0;
 		current_slot->nodes->modifier1 = usr->modifier1;
@@ -485,6 +558,9 @@ struct uwsgi_subscribe_node *uwsgi_add_subscribe_node(struct uwsgi_subscribe_slo
 		if (!current_slot->nodes->weight)
 			current_slot->nodes->weight = 1;
 		current_slot->nodes->wrr = 0;
+		current_slot->nodes->pid = usr->pid;
+		current_slot->nodes->uid = usr->uid;
+		current_slot->nodes->gid = usr->gid;
 		memcpy(current_slot->nodes->name, usr->address, usr->address_len);
 		current_slot->nodes->last_check = uwsgi_now();
 
@@ -516,8 +592,64 @@ struct uwsgi_subscribe_node *uwsgi_add_subscribe_node(struct uwsgi_subscribe_slo
 
 }
 
+static void send_subscription(char *host, char *message, uint16_t message_size) {
 
-void uwsgi_send_subscription(char *udp_address, char *key, size_t keysize, uint8_t modifier1, uint8_t modifier2, uint8_t cmd, char *socket_name, char *sign) {
+        int fd;
+        struct sockaddr_in udp_addr;
+        struct sockaddr_un un_addr;
+        ssize_t ret;
+
+        char *udp_port = strchr(host, ':');
+        if (udp_port) {
+                udp_port[0] = 0;
+
+                fd = socket(AF_INET, SOCK_DGRAM, 0);
+                if (fd < 0) {
+                        uwsgi_error("send_subscription()/socket()");
+                        return;
+                }
+
+                memset(&udp_addr, 0, sizeof(struct sockaddr_in));
+                udp_addr.sin_family = AF_INET;
+                udp_addr.sin_port = htons(atoi(udp_port + 1));
+                udp_addr.sin_addr.s_addr = inet_addr(host);
+        }
+        else {
+                fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+                if (fd < 0) {
+                        uwsgi_error("send_subscription()/socket()");
+                        return;
+                }
+
+                memset(&un_addr, 0, sizeof(struct sockaddr_un));
+                un_addr.sun_family = AF_UNIX;
+                // use 102 as the magic number
+                strncat(un_addr.sun_path, host, 102);
+
+        }
+
+        if (udp_port) {
+                ret = sendto(fd, message, message_size, 0, (struct sockaddr *) &udp_addr, sizeof(udp_addr));
+                udp_port[0] = ':';
+        }
+        else {
+		if (uwsgi.subscriptions_use_credentials) {
+			// could be useless as internally the socket could add them automagically
+                	ret = uwsgi_pass_cred2(fd, message, message_size, (struct sockaddr *) &un_addr, sizeof(un_addr));
+		}
+		else {
+                	ret = sendto(fd, message, message_size, 0, (struct sockaddr *) &un_addr, sizeof(un_addr));
+		}
+        }
+        if (ret < 0) {
+                uwsgi_error("send_subscription()/sendto()");
+        }
+
+        close(fd);
+}
+
+
+void uwsgi_send_subscription(char *udp_address, char *key, size_t keysize, uint8_t modifier1, uint8_t modifier2, uint8_t cmd, char *socket_name, char *sign, char *sni_key, char *sni_crt, char *sni_ca) {
 
 	if (socket_name == NULL && !uwsgi.sockets)
 		return;
@@ -560,8 +692,22 @@ void uwsgi_send_subscription(char *udp_address, char *key, size_t keysize, uint8
 	}
 #endif
 
+	if (sni_key) {
+		if (uwsgi_buffer_append_keyval(ub, "sni_key", 7, sni_key, strlen(sni_key))) goto end;
+	}
 
-	send_udp_message(224, cmd, udp_address, ub->buf, ub->pos - 4);
+	if (sni_crt) {
+		if (uwsgi_buffer_append_keyval(ub, "sni_crt", 7, sni_crt, strlen(sni_crt))) goto end;
+	}
+
+	if (sni_ca) {
+		if (uwsgi_buffer_append_keyval(ub, "sni_ca", 6, sni_ca, strlen(sni_ca))) goto end;
+	}
+
+	// add uwsgi header
+	if (uwsgi_buffer_set_uh(ub, 224, cmd)) goto end;
+
+	send_subscription(udp_address, ub->buf, ub->pos);
 end:
 	uwsgi_buffer_destroy(ub);
 }
@@ -679,7 +825,7 @@ void uwsgi_subscribe(char *subscription, uint8_t cmd) {
                                                                 modifier1_len = strlen(modifier1);
                                                                 keysize = strlen(key);
                                                         }
-                                                        uwsgi_send_subscription(udp_address, key, keysize, uwsgi_str_num(modifier1, modifier1_len), 0, cmd, socket_name, sign);
+                                                        uwsgi_send_subscription(udp_address, key, keysize, uwsgi_str_num(modifier1, modifier1_len), 0, cmd, socket_name, sign, NULL, NULL, NULL);
                                                         modifier1 = NULL;
                                                         modifier1_len = 0;
                                                 }
@@ -697,7 +843,7 @@ void uwsgi_subscribe(char *subscription, uint8_t cmd) {
                                                                 modifier1_len = strlen(modifier1);
                                                                 keysize = strlen(key);
                                                         }
-                                                        uwsgi_send_subscription(udp_address, key, keysize, uwsgi_str_num(modifier1, modifier1_len), 0, cmd, socket_name, sign);
+                                                        uwsgi_send_subscription(udp_address, key, keysize, uwsgi_str_num(modifier1, modifier1_len), 0, cmd, socket_name, sign, NULL, NULL, NULL);
                                                         modifier1 = NULL;
                                                         modifier1_len = 0;
                                                         lines[i] = '\n';
@@ -709,9 +855,8 @@ void uwsgi_subscribe(char *subscription, uint8_t cmd) {
                                 }
                                 keysize++;
                         }
-
-                        free(lines);
                 }
+                free(lines);
         }
         else {
                 modifier1 = strchr(subscription_key + 1, ',');
@@ -727,7 +872,7 @@ void uwsgi_subscribe(char *subscription, uint8_t cmd) {
                         modifier1_len = strlen(modifier1);
                 }
 
-                uwsgi_send_subscription(udp_address, subscription_key + 1, strlen(subscription_key + 1), uwsgi_str_num(modifier1, modifier1_len), 0, cmd, socket_name, sign);
+                uwsgi_send_subscription(udp_address, subscription_key + 1, strlen(subscription_key + 1), uwsgi_str_num(modifier1, modifier1_len), 0, cmd, socket_name, sign, NULL, NULL, NULL);
                 if (modifier1)
                         modifier1[-1] = ',';
                 if (sign)
@@ -752,6 +897,9 @@ void uwsgi_subscribe2(char *arg, uint8_t cmd) {
 	char *s2_modifier1 = NULL;
 	char *s2_modifier2 = NULL;
 	char *s2_check = NULL;
+	char *s2_sni_key = NULL;
+	char *s2_sni_crt = NULL;
+	char *s2_sni_ca = NULL;
 
 	if (uwsgi_kvlist_parse(arg, strlen(arg), ',', '=',
                         "server", &s2_server,
@@ -763,6 +911,9 @@ void uwsgi_subscribe2(char *arg, uint8_t cmd) {
                         "modifier2", &s2_modifier2,
                         "sign", &s2_sign,
                         "check", &s2_check,
+                        "sni_key", &s2_sni_key,
+                        "sni_crt", &s2_sni_crt,
+                        "sni_ca", &s2_sni_ca,
 		NULL)) {
 		return;
 	}
@@ -798,7 +949,7 @@ void uwsgi_subscribe2(char *arg, uint8_t cmd) {
 		modifier2 = atoi(s2_modifier2);
 	}
 
-	uwsgi_send_subscription(s2_server, s2_key, strlen(s2_key), modifier1, modifier2, cmd, s2_addr, s2_sign);
+	uwsgi_send_subscription(s2_server, s2_key, strlen(s2_key), modifier1, modifier2, cmd, s2_addr, s2_sign, s2_sni_key, s2_sni_crt, s2_sni_ca);
 end:
 	if (s2_server) free(s2_server);
 	if (s2_key) free(s2_key);
@@ -812,6 +963,8 @@ end:
 }
 
 void uwsgi_subscribe_all(uint8_t cmd, int verbose) {
+
+	if (uwsgi.subscriptions_blocked) return;
 	// -- subscribe
 	struct uwsgi_string_list *subscriptions = uwsgi.subscriptions;
         while (subscriptions) {

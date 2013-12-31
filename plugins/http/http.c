@@ -10,6 +10,7 @@ struct uwsgi_http uhttp;
 
 struct uwsgi_option http_options[] = {
 	{"http", required_argument, 0, "add an http router/server on the specified address", uwsgi_opt_corerouter, &uhttp, 0},
+	{"httprouter", required_argument, 0, "add an http router/server on the specified address", uwsgi_opt_corerouter, &uhttp, 0},
 #ifdef UWSGI_SSL
 	{"https", required_argument, 0, "add an https router/server on the specified address with specified certificate and key", uwsgi_opt_https, &uhttp, 0},
 	{"https2", required_argument, 0, "add an https/spdy router/server using keyval options", uwsgi_opt_https2, &uhttp, 0},
@@ -53,6 +54,8 @@ struct uwsgi_option http_options[] = {
 	{"http-ss", required_argument, 0, "run the http router stats server", uwsgi_opt_set_str, &uhttp.cr.stats_server, 0},
 	{"http-harakiri", required_argument, 0, "enable http router harakiri", uwsgi_opt_set_int, &uhttp.cr.harakiri, 0},
 	{"http-stud-prefix", required_argument, 0, "expect a stud prefix (1byte family + 4/16 bytes address) on connections from the specified address", uwsgi_opt_add_addr_list, &uhttp.stud_prefix, 0},
+	{"http-uid", required_argument, 0, "drop http routr privileges to the specified uid", uwsgi_opt_uid, &uhttp.cr.uid, 0 },
+	{"http-gid", required_argument, 0, "drop http routr privileges to the specified gid", uwsgi_opt_gid, &uhttp.cr.gid, 0 },
 	{0, 0, 0, 0, 0, 0, 0},
 };
 
@@ -615,6 +618,9 @@ ssize_t http_parse(struct corerouter_peer *main_peer) {
 
 	// is it http body ?
 	if (hr->rnrn == 4) {
+		// something bad happened in keepalive mode...
+		if (!main_peer->session->peers) return -1;
+
 		if (hr->content_length == 0 && !hr->raw_body) {
 			// ignore data...
 			main_peer->in->pos = 0;
@@ -868,7 +874,8 @@ int http_alloc_session(struct uwsgi_corerouter *ucr, struct uwsgi_gateway_socket
 			break;
 #endif
 		default:
-			uwsgi_cr_set_hooks(cs->main_peer, cs->main_peer->last_hook_read, NULL);
+			if (uwsgi_cr_set_hooks(cs->main_peer, cs->main_peer->last_hook_read, NULL))
+				return -1;
 			cs->close = hr_session_close;
 			break;
 	}

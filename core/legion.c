@@ -79,6 +79,9 @@ void uwsgi_parse_legion(char *key, uint16_t keylen, char *value, uint16_t vallen
 		ul->scroll = value;
 		ul->scroll_len = vallen;
 	}
+	else if (!uwsgi_strncmp(key, keylen, "dead", 4)) {
+		ul->dead = 1;
+	}
 }
 
 // this function is called when a node is added or removed (heavy locking is needed)
@@ -611,6 +614,14 @@ static void *legion_loop(void *foobar) {
 					usl = usl->next;
 				}
 			}
+			// remove node announcing death
+			else if (legion_msg.dead) {
+				uwsgi_log("[uwsgi-legion] %s: %.*s valor: %llu uuid: %.*s announced its death to Legion %s\n", node->valor > 0 ? "node" : "arbiter", node->name_len, node->name, node->valor, 36, node->uuid, ul->legion);
+                                uwsgi_wlock(ul->lock);
+                                uwsgi_legion_remove_node(ul, node);
+                                uwsgi_rwunlock(ul->lock);
+				continue;
+			}
 
 			node->last_seen = uwsgi_now();
 			node->lord_valor = legion_msg.lord_valor;
@@ -726,6 +737,7 @@ void uwsgi_legion_add(struct uwsgi_legion *ul) {
 
 int uwsgi_legion_announce(struct uwsgi_legion *ul) {
 	struct uwsgi_buffer *ub = uwsgi_buffer_new(4096);
+	unsigned char *encrypted = NULL;
 
 	if (uwsgi_buffer_append_keyval(ub, "legion", 6, ul->legion, ul->legion_len))
 		goto err;
@@ -752,10 +764,13 @@ int uwsgi_legion_announce(struct uwsgi_legion *ul) {
 		if (uwsgi_buffer_append_keyval(ub, "scroll", 6, ul->scroll, ul->scroll_len))
                 	goto err;
 	}
-#ifdef UWSGI_UUID
-#endif
 
-	unsigned char *encrypted = uwsgi_malloc(ub->pos + 4 + EVP_MAX_BLOCK_LENGTH);
+	if (ul->dead) {
+		if (uwsgi_buffer_append_keyval(ub, "dead", 4, "1", 1))
+                	goto err;
+	}
+
+	encrypted = uwsgi_malloc(ub->pos + 4 + EVP_MAX_BLOCK_LENGTH);
 	if (EVP_EncryptInit_ex(ul->encrypt_ctx, NULL, NULL, NULL, NULL) <= 0) {
 		uwsgi_error("[uwsgi-legion] EVP_EncryptInit_ex()");
 		goto err;
@@ -794,6 +809,7 @@ int uwsgi_legion_announce(struct uwsgi_legion *ul) {
 	return 0;
 err:
 	uwsgi_buffer_destroy(ub);
+	free(encrypted);
 	return -1;
 }
 
@@ -810,6 +826,7 @@ void uwsgi_opt_legion_mcast(char *opt, char *value, void *foobar) {
                 exit(1);
         }
 	uwsgi_legion_register_node(ul, uwsgi_str(ul->addr));
+	free(legion);
 }
 
 void uwsgi_opt_legion_node(char *opt, char *value, void *foobar) {
@@ -1122,6 +1139,14 @@ void uwsgi_legion_action_register(char *name, int (*func) (struct uwsgi_legion *
 	}
 }
 
+void uwsgi_legion_announce_death(void) {
+	struct uwsgi_legion *legion = uwsgi.legions;
+        while (legion) {
+                legion->dead = 1;
+                uwsgi_legion_announce(legion);
+                legion = legion->next;
+        }
+}
 
 void uwsgi_legion_atexit(void) {
 	struct uwsgi_legion *legion = uwsgi.legions;
@@ -1140,6 +1165,7 @@ next:
 		legion = legion->next;
 	}
 
+	uwsgi_legion_announce_death();
 }
 
 int uwsgi_legion_i_am_the_lord(char *name) {

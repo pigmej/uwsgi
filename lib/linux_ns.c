@@ -52,25 +52,39 @@ int uwsgi_is_a_keep_mount(char *mp) {
 	
 }
 
+static int uwsgi_ns_start(void *v_argv) {
+	uwsgi_start(v_argv);
+	return uwsgi_run();
+}
+
 void linux_namespace_start(void *argv) {
 	for (;;) {
 		char stack[PTHREAD_STACK_MIN];
 		int waitpid_status;
+		char *pid_str = NULL;
 		uwsgi_log("*** jailing uWSGI in %s ***\n", uwsgi.ns);
 		int clone_flags = SIGCHLD | CLONE_NEWUTS | CLONE_NEWPID | CLONE_NEWIPC | CLONE_NEWNS;
 		if (uwsgi.ns_net) {
 			clone_flags |= CLONE_NEWNET;
 		}
-		pid_t pid = clone(uwsgi_start, stack + PTHREAD_STACK_MIN, clone_flags, (void *) argv);
+		pid_t pid = clone(uwsgi_ns_start, stack + PTHREAD_STACK_MIN, clone_flags, (void *) argv);
 		if (pid == -1) {
 			uwsgi_error("clone()");
 			exit(1);
 		}
-
+#if defined(MS_REC) && defined(MS_PRIVATE)
+		if (mount(NULL, "/", NULL, MS_REC|MS_PRIVATE, NULL)) {
+			uwsgi_error("mount()");
+			exit(1);
+		}
+#endif
+		pid_str = uwsgi_num2str((int) pid);
 		// run the post-jail scripts
-		if (setenv("UWSGI_JAIL_PID", uwsgi_num2str((int) pid), 1)) {
+		if (setenv("UWSGI_JAIL_PID", pid_str, 1)) {
 			uwsgi_error("setenv()");
 		}
+		free(pid_str);
+		uwsgi_hooks_run(uwsgi.hook_post_jail, "post-jail", 1);
         	struct uwsgi_string_list *usl = uwsgi.exec_post_jail;
         	while(usl) {
                 	uwsgi_log("running \"%s\" (post-jail)...\n", usl->value);
@@ -81,6 +95,13 @@ void linux_namespace_start(void *argv) {
                 	}
                 	usl = usl->next;
         	}
+
+		uwsgi_foreach(usl, uwsgi.call_post_jail) {
+                        if (uwsgi_call_symbol(usl->value)) {
+                                uwsgi_log("unable to call function \"%s\"\n", usl->value);
+				exit(1);
+                        }
+                }
 
 		uwsgi_log("waiting for jailed master (pid: %d) death...\n", (int) pid);
 		pid = waitpid(pid, &waitpid_status, 0);
@@ -93,6 +114,11 @@ void linux_namespace_start(void *argv) {
 		if (WIFEXITED(waitpid_status) && WEXITSTATUS(waitpid_status) == 1) {
 			exit(1);
 		}
+		else if (uwsgi.exit_on_reload && WIFEXITED(waitpid_status) && WEXITSTATUS(waitpid_status) == 0) {
+			uwsgi_log("jailed master process exited and exit-on-reload is enabled, shutting down\n");
+			exit(0);
+		}
+
 
 		uwsgi_log("pid %d ended. Respawning...\n", (int) pid);
 	}
@@ -167,6 +193,7 @@ void linux_namespace_jail() {
 	uwsgi_log("remounting /proc\n");
 	if (mount("proc", "/proc", "proc", 0, NULL)) {
 		uwsgi_error("mount()");
+		exit(1);
 	}
 
 	struct uwsgi_string_list *usl = uwsgi.ns_keep_mount;

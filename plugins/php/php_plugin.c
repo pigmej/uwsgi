@@ -92,11 +92,13 @@ static int sapi_uwsgi_send_headers(sapi_headers_struct *sapi_headers)
 		int hrc = SG(sapi_headers).http_response_code;
 		if (!hrc) hrc = 200;
 		uwsgi_num2str2n(hrc, status, 4);
-		uwsgi_response_prepare_headers(wsgi_req, status, 3);
+		if (uwsgi_response_prepare_headers(wsgi_req, status, 3))
+			return SAPI_HEADER_SEND_FAILED;
 	}
 	else {
 		char *sl = SG(sapi_headers).http_status_line;
-		uwsgi_response_prepare_headers(wsgi_req, sl + 9 , strlen(sl + 9));
+		if (uwsgi_response_prepare_headers(wsgi_req, sl + 9 , strlen(sl + 9)))
+			return SAPI_HEADER_SEND_FAILED;
 	}
 	
 	h = zend_llist_get_first_ex(&sapi_headers->headers, &pos);
@@ -374,7 +376,7 @@ PHP_FUNCTION(uwsgi_rpc) {
 	zval *z_current_obj;
 	char *argv[256];
         uint16_t argvs[256];
-	uint16_t size = 0;
+	uint64_t size = 0;
 
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "+", &varargs, &num_args) == FAILURE) {
 		RETURN_NULL();

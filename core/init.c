@@ -51,6 +51,7 @@ struct http_status_codes hsc[] = {
         {"503", "Service Unavailable"},
         {"504", "Gateway Timeout"},
         {"505", "HTTP Version Not Supported"},
+        {"509", "Bandwidth Limit Exceeded"},
         {"", NULL},
 };
 
@@ -75,10 +76,12 @@ void uwsgi_init_default() {
 	uwsgi.original_log_fd = -1;
 
 	uwsgi.emperor_fd_config = -1;
+	uwsgi.emperor_fd_proxy = -1;
 	// default emperor scan frequency
 	uwsgi.emperor_freq = 3;
 	uwsgi.emperor_throttle = 1000;
 	uwsgi.emperor_heartbeat = 30;
+	uwsgi.emperor_curse_tolerance = 30;
 	// max 3 minutes throttling
 	uwsgi.emperor_max_throttle = 1000 * 180;
 	uwsgi.emperor_pid = -1;
@@ -114,11 +117,11 @@ void uwsgi_init_default() {
 	uwsgi.max_vars = MAX_VARS;
 	uwsgi.vec_size = 4 + 1 + (4 * MAX_VARS);
 
-	uwsgi.shared->options[UWSGI_OPTION_SOCKET_TIMEOUT] = 4;
-	uwsgi.shared->options[UWSGI_OPTION_LOGGING] = 1;
+	uwsgi.socket_timeout = 4;
+	uwsgi.logging_options.enabled = 1;
 
 	// a workers hould be running for at least 10 seconds
-	uwsgi.shared->options[UWSGI_OPTION_MIN_WORKER_LIFETIME] = 10;
+	uwsgi.min_worker_lifetime = 10;
 
 	uwsgi.shared->spooler_frequency = 30;
 
@@ -167,11 +170,19 @@ void uwsgi_init_default() {
 
 	uwsgi.wait_read_hook = uwsgi_simple_wait_read_hook;
 	uwsgi.wait_write_hook = uwsgi_simple_wait_write_hook;
+	uwsgi.wait_milliseconds_hook = uwsgi_simple_wait_milliseconds_hook;
+	uwsgi.wait_read2_hook = uwsgi_simple_wait_read2_hook;
 
 	uwsgi_websockets_init();
 	
 	// 1 MB default limit
 	uwsgi.chunked_input_limit = 1024*1024;
+
+	// clear reforked status
+	uwsgi.master_is_reforked = 0;
+
+	uwsgi.master_fifo_fd = -1;
+	uwsgi_master_fifo_prepare();
 }
 
 void uwsgi_setup_reload() {
@@ -185,7 +196,7 @@ void uwsgi_setup_reload() {
 		uwsgi.reloads++;
 		//convert reloads to string
 		int rlen = snprintf(env_reload_buf, 10, "%u", uwsgi.reloads);
-		if (rlen > 0) {
+		if (rlen > 0 && rlen < 10) {
 			env_reload_buf[rlen] = 0;
 			if (setenv("UWSGI_RELOADS", env_reload_buf, 1)) {
 				uwsgi_error("setenv()");
@@ -216,21 +227,19 @@ void uwsgi_autoload_plugins_by_name(char *argv_zero) {
 		p = original_proc_name;
 	p = strstr(p, "uwsgi_");
 	if (p != NULL) {
-		plugins_requested = strtok(uwsgi_str(p + 6), "_");
-		while (plugins_requested) {
+		char *ctx = NULL;
+		uwsgi_foreach_token(uwsgi_str(p + 6), "_", plugins_requested, ctx) {
 			uwsgi_log("[uwsgi] implicit plugin requested %s\n", plugins_requested);
 			uwsgi_load_plugin(-1, plugins_requested, NULL);
-			plugins_requested = strtok(NULL, "_");
 		}
 	}
 
 	plugins_requested = getenv("UWSGI_PLUGINS");
 	if (plugins_requested) {
 		plugins_requested = uwsgi_concat2(plugins_requested, "");
-		char *p = strtok(plugins_requested, ",");
-		while (p != NULL) {
+		char *p, *ctx = NULL;
+		uwsgi_foreach_token(plugins_requested, ",", p, ctx) {
 			uwsgi_load_plugin(-1, p, NULL);
-			p = strtok(NULL, ",");
 		}
 	}
 
@@ -339,7 +348,6 @@ void uwsgi_setup_workers() {
 		uwsgi.workers[i].signal_pipe[0] = -1;
 		uwsgi.workers[i].signal_pipe[1] = -1;
 		snprintf(uwsgi.workers[i].name, 0xff, "uWSGI worker %d", i);
-		snprintf(uwsgi.workers[i].snapshot_name, 0xff, "uWSGI snapshot %d", i);
 	}
 
 	uint64_t total_memory = (sizeof(struct uwsgi_app) * uwsgi.max_apps) + (sizeof(struct uwsgi_core) * uwsgi.cores) + (sizeof(void *) * uwsgi.max_apps * uwsgi.cores) + (uwsgi.buffer_size * uwsgi.cores) + (sizeof(struct iovec) * uwsgi.vec_size * uwsgi.cores);
@@ -357,6 +365,7 @@ void uwsgi_setup_workers() {
 #ifdef UWSGI_ROUTING
 	uwsgi_fixup_routes(uwsgi.routes);
 	uwsgi_fixup_routes(uwsgi.error_routes);
+	uwsgi_fixup_routes(uwsgi.response_routes);
 	uwsgi_fixup_routes(uwsgi.final_routes);
 #endif
 
@@ -387,6 +396,8 @@ pid_t uwsgi_daemonize2() {
 		uwsgi_write_pidfile(uwsgi.pidfile2);
 	}
 
+	if (uwsgi.log_master) uwsgi_setup_log_master();
+
 	return uwsgi.mypid;
 }
 
@@ -402,7 +413,7 @@ void sanitize_args() {
                 uwsgi.cores = uwsgi.threads;
         }
 
-        if (uwsgi.shared->options[UWSGI_OPTION_HARAKIRI] > 0) {
+        if (uwsgi.harakiri_options.workers > 0) {
                 if (!uwsgi.post_buffering) {
                         uwsgi_log(" *** WARNING: you have enabled harakiri without post buffering. Slow upload could be rejected on post-unbuffered webservers *** \n");
                 }
@@ -438,14 +449,22 @@ void sanitize_args() {
 		}
         }
 
-        if (uwsgi.auto_snapshot > 0 && uwsgi.auto_snapshot > uwsgi.numproc) {
-                uwsgi_log("invalid auto-snapshot value: must be <= than processes\n");
-                exit(1);
-        }
-
-	if (uwsgi.shared->options[UWSGI_OPTION_MAX_WORKER_LIFETIME] > 0 && uwsgi.shared->options[UWSGI_OPTION_MIN_WORKER_LIFETIME] >= uwsgi.shared->options[UWSGI_OPTION_MAX_WORKER_LIFETIME]) {
+	if (uwsgi.max_worker_lifetime > 0 && uwsgi.min_worker_lifetime >= uwsgi.max_worker_lifetime) {
 		uwsgi_log("invalid min-worker-lifetime value (%d), must be lower than max-worker-lifetime (%d)\n",
-			uwsgi.shared->options[UWSGI_OPTION_MIN_WORKER_LIFETIME], uwsgi.shared->options[UWSGI_OPTION_MAX_WORKER_LIFETIME]);
+			uwsgi.min_worker_lifetime, uwsgi.max_worker_lifetime);
+		exit(1);
+	}
+
+	if (uwsgi.cheaper_rss_limit_soft && uwsgi.logging_options.memory_report != 1 && uwsgi.force_get_memusage != 1) {
+		uwsgi_log("enabling cheaper-rss-limit-soft requires enabling also memory-report\n");
+		exit(1);
+	}
+	if (uwsgi.cheaper_rss_limit_hard && !uwsgi.cheaper_rss_limit_soft) {
+		uwsgi_log("enabling cheaper-rss-limit-hard requires setting also cheaper-rss-limit-soft\n");
+		exit(1);
+	}
+	if ( uwsgi.cheaper_rss_limit_hard && uwsgi.cheaper_rss_limit_hard <= uwsgi.cheaper_rss_limit_soft) {
+		uwsgi_log("cheaper-rss-limit-hard value must be higher than cheaper-rss-limit-soft value\n");
 		exit(1);
 	}
 

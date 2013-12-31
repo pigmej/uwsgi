@@ -3542,6 +3542,8 @@ void uwsgi_init_all_apps() {
 
 	int i, j;
 
+	FILE *state_file = create_state_file("/tmp/uwsgi_state");
+
 	uwsgi_hooks_run(uwsgi.hook_pre_app, "pre app", 1);
 
 	// now run the pre-app scripts
@@ -3551,6 +3553,8 @@ void uwsgi_init_all_apps() {
 		int ret = uwsgi_run_command_and_wait(NULL, usl->value);
 		if (ret != 0) {
 			uwsgi_log("command \"%s\" exited with non-zero code: %d\n", usl->value, ret);
+			write_uwsgi_state(state_file, 0);
+			close_state_file(state_file);
 			exit(1);
 		}
 		usl = usl->next;
@@ -3559,6 +3563,8 @@ void uwsgi_init_all_apps() {
 	uwsgi_foreach(usl, uwsgi.call_pre_app) {
                 if (uwsgi_call_symbol(usl->value)) {
                         uwsgi_log("unable to call function \"%s\"\n", usl->value);
+			write_uwsgi_state(state_file, 0);
+			close_state_file(state_file);
 			exit(1);
                 }
         }
@@ -3575,6 +3581,8 @@ void uwsgi_init_all_apps() {
 			uwsgi.gp[i]->init_apps();
 		}
 	}
+
+
 
 	struct uwsgi_string_list *app_mps = uwsgi.mounts;
 	while (app_mps) {
@@ -3594,13 +3602,13 @@ void uwsgi_init_all_apps() {
 		}
 		else {
 			uwsgi_log("invalid mountpoint: %s\n", app_mps->value);
+			write_uwsgi_state(state_file, 0);
+			close_state_file(state_file);
 			exit(1);
 		}
 		app_mps = app_mps->next;
 	}
 
-
-	FILE *state_file = create_state_file("/tmp/uwsgi_state");
 
 	// no app initialized and virtualhosting enabled
 	if (uwsgi_apps_cnt == 0 && uwsgi.numproc > 0 && !uwsgi.command_mode) {
@@ -3608,14 +3616,18 @@ void uwsgi_init_all_apps() {
 			if (!uwsgi.lazy)
 				uwsgi_log("*** no app loaded. GAME OVER ***\n");
 			write_uwsgi_state(state_file, 0);
+			close_state_file(state_file);
 			exit(UWSGI_FAILED_APP_CODE);
 		}
 		else {
 			uwsgi_log("*** no app loaded. going in full dynamic mode ***\n");
+			write_uwsgi_state(state_file, 0);
+			close_state_file(state_file);
 		}
 	}
 
 	write_uwsgi_state(state_file, 1);
+
 	uwsgi_hooks_run(uwsgi.hook_post_app, "post app", 1);
 
 	usl = uwsgi.exec_post_app;
@@ -3624,12 +3636,12 @@ void uwsgi_init_all_apps() {
                 int ret = uwsgi_run_command_and_wait(NULL, usl->value);
                 if (ret != 0) {
                         uwsgi_log("command \"%s\" exited with non-zero code: %d\n", usl->value, ret);
+			write_uwsgi_state(state_file, 0);
 			close_state_file(state_file);
                         exit(1);
                 }
                 usl = usl->next;
         }
-
 
 	write_uwsgi_state(state_file, 2);
 	close_state_file(state_file);
@@ -3639,6 +3651,9 @@ void uwsgi_init_all_apps() {
                         uwsgi_log("unable to call function \"%s\"\n", usl->value);
                 }
         }
+
+	write_uwsgi_state(state_file, 2);
+	close_state_file(state_file);
 
 }
 
